@@ -190,10 +190,14 @@ def persist(
         ).fetchone()[0]
         connection.execute(
             """
-            INSERT INTO submissions VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?
-            )
+            INSERT INTO submissions (
+                number, note, commit_hash, file_path, file_sha256, submitted_at,
+                valid, validated_bytes, queued, tier, dataset_id, dataset_label,
+                attempts_left, submission_id, view_url, status, score_pct, max_t,
+                ood_n_max_t, suite, run_id, modal_call_id, exit_code, command,
+                raw_output
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                      ?, ?, ?, ?, ?, ?)
             """,
             [
                 number,
