@@ -31,7 +31,7 @@ Each row stores the experiment number, note, source commit, source hash, validat
 Inspect it with:
 
 ```bash
-uv run python -c "import duckdb; duckdb.sql(\"FROM 'submissions.duckdb'\").show()"
+uv run python -c "import duckdb; duckdb.connect('submissions.duckdb').sql('FROM submissions').show()"
 ```
 
 ## Submission history
