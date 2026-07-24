@@ -40,4 +40,5 @@ uv run python -c "import duckdb; duckdb.sql(\"FROM 'submissions.duckdb'\").show(
 | Number | Note | Commit | Status | Score |
 | ---: | --- | --- | --- | ---: |
 | 1 | official test submission file | [`a66155a`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/a66155afa3596d7c43ed2813d45299d4f833d173) | succeeded | 3.83% |
+| 2 | gpt-2 small | [`655c650`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/655c650bfcd5a460c9f18089bb58e91ea6622acd) | succeeded | 1.33% |
 <!-- SUBMISSIONS_TABLE_END -->
