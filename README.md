@@ -170,4 +170,5 @@ uv run python -c "import duckdb; duckdb.connect('submissions.duckdb').sql('FROM 
 | 7 | T2MLR gated middle cache, 80 steps | [`47646db`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/47646db668748230211074d0463b75aa2f91c133) | succeeded | 4.17% |
 | 8 | soft Thoughtbubbles + functional depth encoding, 80 steps | [`a408a7d`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/a408a7dd27ae4648571102948be2f098429dd8aa) | succeeded | 5.50% |
 | 9 | single-layer width-128 bidirectional simple RNN | [`77788bd`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/77788bde51bff99006d3512cfad34e3f62a3856f) | succeeded | 6.33% |
+| 10 | hierarchical N/x/T encoders + T-step tied GRU | [`61a83cc`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/61a83ccb7b7d08211e1eb4db53af5f1f52ea2452) | succeeded | 6.00% |
 <!-- SUBMISSIONS_TABLE_END -->
