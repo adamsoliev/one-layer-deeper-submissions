@@ -1,4 +1,4 @@
-"""T-conditioned tied recurrent Transformer for One Layer Deeper."""
+"""T2MLR-style latent recurrence for One Layer Deeper."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from benchmark import (
 
 WIDTH = 128
 NUM_HEADS = 4
-NUM_LAYERS = 2
+NUM_LAYERS = 3
 MLP_WIDTH = 512
 DROPOUT = 0.1
 WARMUP_STEPS = 10
@@ -91,8 +91,34 @@ class TransformerBlock(nn.Module):
         return hidden
 
 
+class T2MLRFusion(nn.Module):
+    """Paper-faithful gated fusion of the current stream and recurrent cache."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.current_gate = nn.Linear(2 * WIDTH, WIDTH)
+        self.recurrent_gate = nn.Linear(2 * WIDTH, WIDTH)
+        self.recurrent_projection = nn.Linear(WIDTH, WIDTH)
+        self.gamma_current = nn.Parameter(torch.zeros(()))
+        self.gamma_recurrent = nn.Parameter(torch.zeros(()))
+
+    def forward(self, current: Tensor, recurrent_cache: Tensor) -> Tensor:
+        joined = torch.cat((current, recurrent_cache), dim=-1)
+        current_update = (
+            torch.tanh(self.gamma_current)
+            * torch.sigmoid(self.current_gate(joined))
+            * current
+        )
+        recurrent_update = (
+            torch.tanh(self.gamma_recurrent)
+            * torch.sigmoid(self.recurrent_gate(joined))
+            * self.recurrent_projection(recurrent_cache)
+        )
+        return current + current_update + recurrent_update
+
+
 class IntermediateTransformer(nn.Module):
-    """Encode once, then reuse the second block for exactly T transitions."""
+    """Use T2MLR fusion and a temporal residual for exactly T latent steps."""
 
     def __init__(self, spec: ModelSpec) -> None:
         super().__init__()
@@ -100,6 +126,8 @@ class IntermediateTransformer(nn.Module):
         self.token_embedding = nn.Embedding(spec.vocab_size, WIDTH)
         self.position_embedding = nn.Embedding(spec.max_seq_len, WIDTH)
         self.blocks = nn.ModuleList(TransformerBlock() for _ in range(NUM_LAYERS))
+        self.fusion = T2MLRFusion()
+        self.cache_norm = nn.RMSNorm(WIDTH)
         self.final_norm = nn.LayerNorm(WIDTH)
         self.output = nn.Linear(WIDTH, spec.vocab_size, bias=False)
         self.apply(self._initialize)
@@ -125,15 +153,21 @@ class IntermediateTransformer(nn.Module):
         positions = torch.arange(length, device=input_ids.device)
         hidden = self.token_embedding(input_ids) + self.position_embedding(positions)
         hidden = F.dropout(hidden, p=DROPOUT, training=self.training)
-        hidden = self.blocks[0](hidden, attention_mask)
+        current = self.blocks[0](hidden, attention_mask)
+        recurrent_cache = torch.zeros_like(current)
+        final_middle = current
 
         time_steps = self._decode_time_steps(input_ids)
         recurrent_steps = 3 if self.training else MAX_RECURRENT_STEPS
         for step in range(recurrent_steps):
-            transitioned = self.blocks[1](hidden, attention_mask)
+            fused = self.fusion(current, recurrent_cache)
+            middle = self.blocks[1](fused, attention_mask)
+            updated_cache = self.cache_norm(middle + recurrent_cache)
             active = (time_steps > step).view(-1, 1, 1)
-            hidden = torch.where(active, transitioned, hidden)
+            recurrent_cache = torch.where(active, updated_cache, recurrent_cache)
+            final_middle = torch.where(active, middle, final_middle)
 
+        hidden = self.blocks[2](final_middle, attention_mask)
         logits = self.output(self.final_norm(hidden))
         return logits, None
 
