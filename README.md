@@ -2,6 +2,7 @@
 
 This repository tracks model experiments for the [One Layer Deeper competition](https://onelayerdeeper.ai/) and its [official GitHub repository](https://github.com/tilde-research/one-layer-deeper).
 The competition evaluates a self-contained PyTorch model and optimizer under a fixed model-state limit and H100 training-time budget.
+Every submission must strictly follow the [official competition rules](https://github.com/tilde-research/one-layer-deeper#rules), which are authoritative.
 
 ## Public datasets
 
