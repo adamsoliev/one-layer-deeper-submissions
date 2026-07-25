@@ -26,8 +26,15 @@ The ordinary OOD split holds out the listed OOD value of `T`; it is distinct fro
 
 E1 fixes the modulus at `N = 17 × 19 = 323`.
 The input value `x` varies between examples, while the training and ordinary test splits use `T ∈ {1,2,3}` and the ordinary OOD split uses the unseen depth `T=6`.
-For each familiar `T`, the generator creates 250 unique `(N,x,T)` prompts and assigns 200 to training and 50 to test, giving 600 training examples and 150 test examples.
-The OOD split contains 100 additional prompts at `T=6`.
+For each of `T=1,2,3`, the generator creates 250 unique `(N,x,T)` prompts and splits them as follows:
+
+| `T` | Train | Test | Ordinary OOD | Total |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 200 | 50 | 0 | 250 |
+| 2 | 200 | 50 | 0 | 250 |
+| 3 | 200 | 50 | 0 | 250 |
+| 6 | 0 | 0 | 100 | 100 |
+| **Total** | **600** | **150** | **100** | **850** |
 
 The mathematical recurrence is `x₀=x` and `xₜ=xₜ₋₁² mod N`, so the requested output is `x_T = x^(2^T) mod N`.
 Each supervised example contains only the tokenized prompt `(N,x,T)` and the decimal digits of the final `x_T`.
