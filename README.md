@@ -67,8 +67,6 @@ prediction = Decoder(z_final)
 
 The unified state `zₖ` must retain `T`, or a representation derived from `T`, so the model knows the requested computation depth.
 It also needs progress information such as the current iteration, remaining depth, an update mask, or a learned halting signal.
-Earlier notation wrote this progress information as `control` in `stateₖ₊₁ = fθ(stateₖ, N, control)`.
-`control` was not an additional evaluator input; it meant internal `T`-dependent recurrence and stopping information.
 Keeping `N` and `T` as immutable context beside the evolving residue state is equivalent to storing them inside one unified state.
 
 The recurrence should be tied, meaning every step reuses the same transition `fθ`.
