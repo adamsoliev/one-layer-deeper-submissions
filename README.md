@@ -3,6 +3,38 @@
 This repository tracks model experiments for the [One Layer Deeper competition](https://onelayerdeeper.ai/) and its [official GitHub repository](https://github.com/tilde-research/one-layer-deeper).
 The competition evaluates a self-contained PyTorch model and optimizer under a fixed model-state limit and H100 training-time budget.
 
+## Public datasets
+
+Every example supplies `(N, x, T)` and asks the model to predict the decimal digits of `x^(2^T) mod N`.
+The public Easy and Medium datasets isolate different combinations of fixed or sampled moduli and fixed or varying computation depths.
+The ordinary OOD split holds out the listed OOD value of `T`; it is distinct from the separate `OOD N Max T` profile described below.
+
+| Dataset | Training modulus `N` | Training `T` | Ordinary OOD `T` | Training budget |
+| --- | --- | --- | ---: | ---: |
+| E1 | Fixed `N=323` | 1, 2, 3 | 6 | 60 seconds |
+| E2 | Fixed `N=899` | 1, 2, 4 | 7 | 60 seconds |
+| E3 | Sampled 10/11-bit `N` | 2 | 4 | 60 seconds |
+| E4 | Sampled 11/12-bit `N` | 2 | 4 | 60 seconds |
+| E5 | Sampled 10/11-bit `N` | 1, 2, 3 | 6 | 60 seconds |
+| M1 | Fixed `N=10,403` | 4, 8, 16 | 32 | 600 seconds |
+| M2 | Fixed `N=38,021` | 4, 8, 16 | 32 | 600 seconds |
+| M3 | Sampled 11/13/15-bit `N` | 2 | 4 | 600 seconds |
+| M4 | Sampled 14/18/22-bit `N` | 8 | 16 | 600 seconds |
+| M5 | Sampled 12/14/16-bit `N` | 2, 4, 8 | 16 | 600 seconds |
+
+## Depth certification
+
+`Max T` is a certification threshold over the fixed ladder `T = 1, 2, 4, 8, 16, 32, 64`.
+For each rung, the evaluator generates fresh prompts using familiar modulus identities or problem families.
+A rung passes only when every example at that rung is exactly correct, and certification must be a consecutive prefix starting at `T=1`.
+For example, perfect results at `T=1` and `T=2` followed by any error at `T=4` produce `Max T = 2`; a later perfect `T=8` result cannot raise it.
+`Max T <1` means the model failed to answer every `T=1` certification example correctly.
+
+`OOD N Max T` applies the same ladder and consecutive-prefix rule to fresh, unseen modulus identities at nearby dataset-scale bit sizes.
+It does not mean the largest numerical value of `N`, nor does `Max T` mean the largest `T` example present in a dataset.
+Easy and Medium report both values as diagnostics, but their scores remain the mean ordinary exact accuracy.
+The Hard leaderboard ranks submissions lexicographically by `Max T`, then `OOD N Max T`, and then earlier submission time.
+
 ## Submission workflow
 
 Install the competition CLI, authenticate once, and install this project's dependencies:
