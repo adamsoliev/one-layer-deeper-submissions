@@ -32,7 +32,9 @@ Training/test depths: T = 1, 2, 3
 OOD depth:           T = 6
 ```
 
-For each of `T=1,2,3`, the generator creates 250 examples and splits them:
+For each familiar depth `T ∈ {1,2,3}`, the generator creates 250 examples: 200 train and 50 test.
+Across the three familiar depths, this produces 600 train and 150 test examples.
+The generator separately creates 100 OOD examples at `T=6`; they are not taken from the 750 familiar-depth examples.
 
 | Split | Values of `T` | Examples | Purpose |
 | --- | --- | ---: | --- |
