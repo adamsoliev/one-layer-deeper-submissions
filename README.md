@@ -22,6 +22,23 @@ The ordinary OOD split holds out the listed OOD value of `T`; it is distinct fro
 | M4 | Sampled 14/18/22-bit `N` | 8 | 16 | 600 seconds |
 | M5 | Sampled 12/14/16-bit `N` | 2, 4, 8 | 16 | 600 seconds |
 
+## E1 in detail
+
+E1 fixes the modulus at `N = 17 × 19 = 323`.
+The input value `x` varies between examples, while the training and ordinary test splits use `T ∈ {1,2,3}` and the ordinary OOD split uses the unseen depth `T=6`.
+For each familiar `T`, the generator creates 250 unique `(N,x,T)` prompts and assigns 200 to training and 50 to test, giving 600 training examples and 150 test examples.
+The OOD split contains 100 additional prompts at `T=6`.
+
+The mathematical recurrence is `x₀=x` and `xₜ=xₜ₋₁² mod N`, so the requested output is `x_T = x^(2^T) mod N`.
+Each supervised example contains only the tokenized prompt `(N,x,T)` and the decimal digits of the final `x_T`.
+It does not expose intermediate states such as `x₁` or `x₂`, and the model is not directly trained on individual recurrence transitions.
+
+Test accuracy is exact-example accuracy on the 150 held-out prompts at familiar depths.
+Ordinary OOD accuracy is exact-example accuracy on the 100 prompts at unseen depth `T=6` with the same fixed `N=323`.
+Every output digit must be correct for an example to count.
+The E1 score is the unweighted mean of test and ordinary OOD accuracy, so the two splits receive equal weight despite containing different numbers of examples.
+The separate `OOD N Max T` profile instead uses fresh 10/11-bit moduli and does not contribute to the E1 score.
+
 ## Depth certification
 
 `Max T` is a certification threshold over the fixed ladder `T = 1, 2, 4, 8, 16, 32, 64`.
