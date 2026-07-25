@@ -1,4 +1,4 @@
-"""Regularized intermediate Transformer for One Layer Deeper."""
+"""T-conditioned tied recurrent Transformer for One Layer Deeper."""
 
 from __future__ import annotations
 
@@ -24,6 +24,9 @@ MLP_WIDTH = 512
 DROPOUT = 0.1
 WARMUP_STEPS = 10
 SCHEDULE_STEPS = 80
+T_TOKEN_ID = 4
+DIGIT_OFFSET = 7
+MAX_RECURRENT_STEPS = 64
 
 
 class Config:
@@ -89,7 +92,7 @@ class TransformerBlock(nn.Module):
 
 
 class IntermediateTransformer(nn.Module):
-    """Two-layer model with explicit regularization and early stopping."""
+    """Encode once, then reuse the second block for exactly T transitions."""
 
     def __init__(self, spec: ModelSpec) -> None:
         super().__init__()
@@ -122,10 +125,37 @@ class IntermediateTransformer(nn.Module):
         positions = torch.arange(length, device=input_ids.device)
         hidden = self.token_embedding(input_ids) + self.position_embedding(positions)
         hidden = F.dropout(hidden, p=DROPOUT, training=self.training)
-        for block in self.blocks:
-            hidden = block(hidden, attention_mask)
+        hidden = self.blocks[0](hidden, attention_mask)
+
+        time_steps = self._decode_time_steps(input_ids)
+        recurrent_steps = 3 if self.training else MAX_RECURRENT_STEPS
+        for step in range(recurrent_steps):
+            transitioned = self.blocks[1](hidden, attention_mask)
+            active = (time_steps > step).view(-1, 1, 1)
+            hidden = torch.where(active, transitioned, hidden)
+
         logits = self.output(self.final_norm(hidden))
         return logits, None
+
+    @staticmethod
+    def _decode_time_steps(input_ids: Tensor) -> Tensor:
+        time_steps = torch.zeros(
+            input_ids.shape[0],
+            device=input_ids.device,
+            dtype=torch.long,
+        )
+        after_marker = torch.zeros_like(time_steps, dtype=torch.bool)
+        for position in range(input_ids.shape[1]):
+            token = input_ids[:, position]
+            after_marker = after_marker | (token == T_TOKEN_ID)
+            is_digit = after_marker & (token >= DIGIT_OFFSET)
+            digit = (token - DIGIT_OFFSET).clamp(min=0, max=9)
+            time_steps = torch.where(
+                is_digit,
+                time_steps * 10 + digit,
+                time_steps,
+            )
+        return time_steps.clamp(min=1, max=MAX_RECURRENT_STEPS)
 
 
 def build_model(spec: ModelSpec) -> IntermediateTransformer:
