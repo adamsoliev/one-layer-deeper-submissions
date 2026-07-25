@@ -143,3 +143,55 @@ Zero-order optimization is not a valid submission strategy under the current eva
 Expected failure modes include untrained depth embeddings at unseen T, bubbles collapsing to identical states, bubbles specializing by familiar T rather than computational role, excessive recurrence compute reducing optimizer steps, and learned merge weights suppressing useful branches.
 
 The unresolved question is whether parallel latent streams can learn stable arithmetic roles that improve a fundamentally serial transition, rather than acting as an expensive ensemble.
+
+## 6. Soft-Thoughtbubbles E1 result
+
+Submission 8 implemented the first proposal as a two-stream differentiable approximation to Thoughtbubbles.
+
+The treatment retained the T²MLR gated-cache backbone from submission 7, duplicated the recurrent working state into two learned bubble identities, allowed attention across the flattened bubble streams, accumulated a learned score for each stream, attenuated updates using the resulting softmax weights, and merged the streams before the final Transformer block.
+
+Every recurrent application also received a functional six-feature depth encoding derived from the current iteration, requested T, remaining progress, and sinusoidal progress.
+
+This functional encoding avoided untrained per-depth lookup entries at the unseen evaluation depths.
+
+The evaluator-provided mixture T ∈ {1, 2, 3} supplied the length-generalization training distribution, and the same middle Transformer block remained tied across every recurrent application.
+
+The official validator accepted the source, and local checks confirmed finite outputs through the 64-step evaluation path and nonzero gradients for the bubble embeddings, score head, depth projection, and tied recurrent block.
+
+The hosted E1 run succeeded as submission `ce357172-8f06-4be9-a224-e482f8bd0eee` from source commit `a408a7d`.
+
+The run completed all 80 optimizer steps in 23.93 seconds and evaluated in 6.53 seconds.
+
+The E1 manifest instantiated 701,315 model-state elements and 1,402,687 optimizer-state elements after the first update.
+
+Mean exact accuracy was 5.50 percent, the highest of the first eight repository submissions.
+
+The static width-128 control scored 5.17 percent, direct tied depth scored 4.33 percent, and the T²MLR gated-cache model scored 4.17 percent.
+
+The apparent improvement over the static control was only 0.33 percentage points and came from one additional familiar-depth success.
+
+The Thoughtbubbles model solved 3 of 150 familiar-depth test examples compared with 2 for the static control.
+
+Both models solved the same 9 of 100 ordinary OOD examples at T = 6.
+
+Consequently, this run provides no evidence that bubbles or depth encoding improved ordinary depth extrapolation.
+
+The mean evaluation loss was 1.937, compared with 1.949 for the static control, 1.882 for direct tied depth, and 1.923 for T²MLR.
+
+The Thoughtbubbles model therefore achieved the best exact-match score without achieving the best token-level likelihood.
+
+On the fixed-N certification ladder it solved 0 of 38 examples at T = 1, 2 of 38 at T = 2, and 0 of 38 at every rung from T = 4 through T = 64.
+
+It consequently reported `Max T <1`.
+
+On the unseen-N ladder it solved between 0 and 4 of 512 examples at each rung and also reported `OOD N Max T <1`.
+
+These sparse, non-monotonic successes are inconsistent with a reusable repeated-squaring transition.
+
+The result falsifies the strong proposal-1 hypothesis in this implementation: soft parallel streams plus explicit functional progress information did not create systematic depth generalization under final-answer-only supervision.
+
+It does not isolate the individual contributions of bubbles and depth encoding because both were added together, and it cannot verify bubble specialization because the evaluator does not return trained parameters or routing statistics.
+
+The next controlled experiment should add only the functional depth encoding to the direct tied-depth model.
+
+That ablation would determine whether the encoding supplies useful progress information or whether the aggregate score change came from the parallel-stream ensemble and sampling noise.
