@@ -189,7 +189,7 @@ def build_optimizer(
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=1e-3,
-        betas=(0.9, 0.95),
+        betas=(0.9, 0.999),
         weight_decay=0.01,
         capturable=spec.device_type == "cuda",
     )
