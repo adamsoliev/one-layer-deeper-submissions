@@ -164,4 +164,5 @@ uv run python -c "import duckdb; duckdb.connect('submissions.duckdb').sql('FROM 
 | 2 | gpt-2 small | [`655c650`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/655c650bfcd5a460c9f18089bb58e91ea6622acd) | succeeded | 1.33% |
 | 3 | 4-layer width-256, warmup+cosine, dropout+label smoothing | [`6630a45`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/6630a4507c8d9a7bb33d7034210bd96e50136ce2) | succeeded | 4.33% |
 | 4 | 2-layer width-128, 80 steps, warmup+cosine, dropout+label smoothing | [`4ac12ae`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/4ac12ae68373c55ed3dd30b827fb535688ed9276) | succeeded | 5.17% |
+| 5 | tied second block repeated exactly T, 80 steps | [`2340c1c`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/2340c1c6224c992c0fc91177186b670ecb7aab2d) | failed | — |
 <!-- SUBMISSIONS_TABLE_END -->
