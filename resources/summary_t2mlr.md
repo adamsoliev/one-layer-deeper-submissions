@@ -198,6 +198,34 @@ The hypothesis is falsified if gains are confined to familiar depths, disappear 
 Only after a positive E1 result should the same transition be tested on E5 or M5 for joint unseen-`T` and unseen-`N` behavior.
 A result on E1 alone cannot establish modulus generalization because the transition may specialize to arithmetic modulo 323.
 
+## 6. Controlled E1 tied-depth result
+
+Submission 6 tested the smallest parameter-matched recurrence change against submission 4, the existing two-layer width-128 E1 control.
+The treatment preserves the control's embeddings, two Transformer blocks, output head, initialization, optimizer, warmup-plus-cosine schedule, dropout, label smoothing, 80-step limit, and seed.
+It changes only the forward topology: block 0 encodes once, block 1 is reused for exactly the input's requested `T` state updates, and a GPU-resident mask leaves completed examples unchanged.
+Training unrolls the public E1 maximum of three updates, while evaluation executes a fixed 64-iteration GPU loop and masks state updates after each example's decoded `T`.
+This design adds no parameters, performs no modular arithmetic, and uses the public `T` field only for input-dependent routing.
+For `T = 1`, the treatment is numerically identical to the control at equal weights.
+
+The hosted H100 run succeeded as submission `e5bc8c6c-5d66-4a71-982c-3479de825133` from source commit `6c91e99`.
+Both models contain 402,816 persistent state elements, create 805,661 optimizer-state elements after the first step, use batch size 512, complete all 80 training steps, and run with seed 74.
+The tied-depth model scored 4.33 percent mean exact accuracy against 5.17 percent for the control, a decrease of 0.83 percentage points or about 16 percent relative.
+Familiar-depth test exact accuracy increased from 1.33 percent, or 2 of 150 examples, to 2.67 percent, or 4 of 150 examples.
+OOD exact accuracy at `T = 6` decreased from 9 percent, or 9 of 100 examples, to 6 percent, or 6 of 100 examples.
+Neither model certified the first `T = 1` rung on the ordinary or OOD-`N` depth ladder, so both report `Max T <1` and `OOD N Max T <1`.
+
+Cross-entropy moved in the opposite direction from exact match.
+The treatment reduced familiar-depth test loss from 1.989 to 1.980, OOD loss from 1.909 to 1.785, mean evaluation loss from 1.949 to 1.882, and final training loss from 1.933 to 1.924.
+The most conservative interpretation is that tied recurrence improved average token likelihood slightly but did not organize the full output digit sequence into a more exact repeated-squaring computation.
+The two additional familiar-depth successes and three lost OOD successes are too few for a reliable claim about small accuracy differences from this single seed.
+The failed certification is nevertheless decisive for the architectural hypothesis as tested: exact `T`-conditioned block reuse alone did not produce measurable algorithmic depth extrapolation.
+
+The likely failure is underdetermined transition learning under final-answer-only supervision.
+The shared block receives gradients through one, two, or three applications during training, but nothing forces one application to represent one modular squaring or keeps its hidden-state dynamics stable at six or more applications.
+Lower OOD cross-entropy alongside lower OOD exact match is consistent with better marginal digit probabilities but continued sequence-level errors, rather than a learned latent state machine.
+A useful next treatment would introduce an explicit mutable residue register and identity-initialized gated fusion while leaving immutable modulus context outside the recurrent state.
+That experiment should be compared with this tied-depth model, not only with the original static encoder, because it would isolate the paper's state-fusion mechanism from recurrence itself.
+
 ## Implementation hypotheses
 
 The highest-priority hypothesis is that a dedicated persistent residue register fused into a tied latent transition will extrapolate across `T` better than the current untied two-layer encoder.
