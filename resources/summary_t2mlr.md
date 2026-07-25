@@ -226,6 +226,38 @@ Lower OOD cross-entropy alongside lower OOD exact match is consistent with bette
 A useful next treatment would introduce an explicit mutable residue register and identity-initialized gated fusion while leaving immutable modulus context outside the recurrent state.
 That experiment should be compared with this tied-depth model, not only with the original static encoder, because it would isolate the paper's state-fusion mechanism from recurrence itself.
 
+## 7. T²MLR gated-cache E1 result
+
+Submission 7 implemented the paper's gated fusion and temporal cache residual as closely as the separate-input/output benchmark permits.
+The architecture uses one early Transformer block, one middle Transformer block, and one late Transformer block.
+At each latent step, the fixed early representation is fused with a separate recurrent cache using Equation 3's two random linear feature gates, two zero-initialized scalar gates, and learned recurrent projection.
+The middle block processes the fused representation, after which Equation 4 updates the cache with an RMS-normalized temporal residual.
+The late block processes only the final active middle representation, matching the paper's separation between the recurrent middle path and the ordinary late path.
+Exact unrolling replaces the paper's Jacobi approximation because E1 exposes at most three training steps and the benchmark requires latent recurrence over numeric `T`, not recurrence over an autoregressive output trajectory.
+
+The hosted H100 run succeeded as submission `a6eb3958-62c8-401e-84d2-87ca895b23ef` from source commit `47646db`.
+The E1 manifest instantiated 683,522 model-state elements and 1,367,094 optimizer-state elements after the first step, compared with 402,816 and 805,661 for both earlier controls.
+All models used batch size 512, seed 74, and completed the same 80 optimizer steps.
+The gated-cache model required 42.81 training seconds and 9.28 evaluation seconds, compared with 24.44 and 4.99 seconds for the static control and 21.30 and 3.98 seconds for direct tied depth.
+
+Mean exact accuracy was 4.17 percent, below 5.17 percent for the static two-layer control and 4.33 percent for direct tied depth.
+Familiar-depth test accuracy was 1.33 percent, or 2 of 150 examples, equal to the static control and below the tied-depth model's 2.67 percent.
+OOD accuracy at `T = 6` was 7 percent, or 7 of 100 examples, between the static control's 9 percent and the tied-depth model's 6 percent.
+Mean evaluation loss was 1.923, better than the static control's 1.949 but worse than direct tied depth's 1.882.
+Final training loss was 1.937, slightly worse than 1.933 for the static control and 1.924 for direct tied depth.
+The ordinary and OOD-`N` profiles again failed their first certification rung, so the result remains `Max T <1` and `OOD N Max T <1`.
+
+This result does not support the hypothesis that Equation 3 and Equation 4 alone turn a shallow tied transition into a learned modular-squaring state machine.
+The modest loss improvement over the static model without an exact-match improvement again indicates better marginal digit probabilities rather than reliable sequence computation.
+The experiment also exposes the cost of the more faithful mechanism: the extra late block and approximately 281,000 fusion and block parameters nearly doubled evaluation time while producing no depth gain.
+The single seed and low exact-success counts do not resolve small differences among the three accuracy scores, but the complete certification failure rules out meaningful systematic extrapolation in this setting.
+
+The remaining mismatch with literal T²MLR is structural rather than an omitted module.
+The paper receives a new token representation at every recurrent step and trains with dense next-token supervision, whereas this adaptation repeatedly combines a fixed encoded prompt with its cache and receives supervision only on the final residue digits.
+With only one early block and one middle block, the cached state may also lack the abstract structure that the paper obtains before and across a substantially deeper recurrent span.
+Zero-initialized global gates stabilize the initial network but leave only 80 updates to activate and shape the recurrent path.
+Consequently, this run tests an equation-faithful latent-step adaptation of T²MLR, not the paper's original token-temporal architecture or its language-modeling claims.
+
 ## Implementation hypotheses
 
 The highest-priority hypothesis is that a dedicated persistent residue register fused into a tied latent transition will extrapolate across `T` better than the current untied two-layer encoder.
