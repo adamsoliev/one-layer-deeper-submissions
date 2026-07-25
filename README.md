@@ -42,6 +42,38 @@ The generator separately creates 100 OOD examples at `T=6`.
 | Test | 1, 2, 3 | 150 | New prompts at familiar depths |
 | OOD | 6 | 100 | New prompts at an unseen depth |
 
+## Architecture notes
+
+A model intended to learn the repeated computation needs four functional parts:
+
+1. An encoder maps the tokenized inputs `(x,N,T)` into an initial learned working state.
+2. The working state carries a representation of the current residue, the modulus, the requested depth, and recurrence progress.
+3. A tied recurrent transition updates that state from its previous value using the same learned parameters at every step.
+4. A decoder maps the final state to the decimal digits of `x_T`.
+
+The high-level computation is:
+
+```text
+(x, N, T) → Encoder → z₀ → fθ → z₁ → fθ → … → zₖ → Decoder → x_T
+```
+
+Equivalently:
+
+```text
+z₀ = Encoder(x, N, T)
+zₖ₊₁ = fθ(zₖ)
+prediction = Decoder(z_final)
+```
+
+The unified state `zₖ` must retain `T`, or a representation derived from `T`, so the model knows the requested computation depth.
+It also needs progress information such as the current iteration, remaining depth, an update mask, or a learned halting signal.
+Earlier notation wrote this progress information as `control` in `stateₖ₊₁ = fθ(stateₖ, N, control)`.
+`control` was not an additional evaluator input; it meant internal `T`-dependent recurrence and stopping information.
+Keeping `N` and `T` as immutable context beside the evolving residue state is equivalent to storing them inside one unified state.
+
+The recurrence should be tied, meaning every step reuses the same transition `fθ`.
+An untied stack with different parameters at every layer can learn separate mappings for familiar depths without learning a transition that extrapolates to larger `T`.
+
 ## Depth certification
 
 `Max T` is a certification threshold over the fixed ladder `T = 1, 2, 4, 8, 16, 32, 64`.
