@@ -58,29 +58,28 @@ The vocabulary contains 17 tokens:
 | `[EOS]` | 6 |
 | Decimal digit `d` | `7 + d` |
 
-The digit rule applies to every decimal digit in both the input prompt and the output target.
-The separate input/output format used by the public Easy and Medium datasets constructs the input as:
+The input is tokenized in this order:
 
 ```text
 [N] digits(N) [X] digits(x) [T] digits(T)
 ```
 
-For example, `(N=323, x=5, T=2)` becomes:
+For example, input `(N=323, x=5, T=2)`:
 
 ```text
 symbols:   [N] [3] [2] [3] [X] [5] [T] [2]
 token IDs:  2  10   9  10   3  12   4   9
 ```
 
-If the target result is `302`, the separate output contains only its digit tokens:
+The output `302`:
 
 ```text
 symbols:   [3] [0] [2]
 token IDs: 10   7   9
 ```
 
-The field markers `[N]`, `[X]`, and `[T]` occur in the input, not the separate output.
-`[PAD]` fills unused batch positions; `[BOS]`, `[ANS]`, and `[EOS]` belong to the alternative combined causal representation and are not added to these separate public prompts and targets.
+`[PAD]` fills unused batch positions.
+`[BOS]`, `[ANS]`, and `[EOS]` belong to an alternative combined causal representation and are not used in the public Easy and Medium input and output tensors.
 
 ## Architecture notes
 
