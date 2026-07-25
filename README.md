@@ -24,27 +24,21 @@ The ordinary OOD split holds out the listed OOD value of `T`; it is distinct fro
 
 ## E1 in detail
 
-E1 fixes the modulus at `N = 17 × 19 = 323`.
-The input value `x` varies between examples, while the training and ordinary test splits use `T ∈ {1,2,3}` and the ordinary OOD split uses the unseen depth `T=6`.
-For each of `T=1,2,3`, the generator creates 250 unique `(N,x,T)` prompts and splits them as follows:
+E1 fixes:
 
-| `T` | Train | Test | Ordinary OOD | Total |
-| ---: | ---: | ---: | ---: | ---: |
-| 1 | 200 | 50 | 0 | 250 |
-| 2 | 200 | 50 | 0 | 250 |
-| 3 | 200 | 50 | 0 | 250 |
-| 6 | 0 | 0 | 100 | 100 |
-| **Total** | **600** | **150** | **100** | **850** |
+```text
+N = 17 × 19 = 323
+Training/test depths: T = 1, 2, 3
+OOD depth:           T = 6
+```
 
-The mathematical recurrence is `x₀=x` and `xₜ=xₜ₋₁² mod N`, so the requested output is `x_T = x^(2^T) mod N`.
-Each supervised example contains only the tokenized prompt `(N,x,T)` and the decimal digits of the final `x_T`.
-It does not expose intermediate states such as `x₁` or `x₂`, and the model is not directly trained on individual recurrence transitions.
+For each of `T=1,2,3`, the generator creates 250 examples and splits them:
 
-Test accuracy is exact-example accuracy on the 150 held-out prompts at familiar depths.
-Ordinary OOD accuracy is exact-example accuracy on the 100 prompts at unseen depth `T=6` with the same fixed `N=323`.
-Every output digit must be correct for an example to count.
-The E1 score is the unweighted mean of test and ordinary OOD accuracy, so the two splits receive equal weight despite containing different numbers of examples.
-The separate `OOD N Max T` profile instead uses fresh 10/11-bit moduli and does not contribute to the E1 score.
+| Split | Values of `T` | Examples | Purpose |
+| --- | --- | ---: | --- |
+| Train | 1, 2, 3 | 600 | Parameters are updated on these |
+| Test | 1, 2, 3 | 150 | New prompts at familiar depths |
+| OOD | 6 | 100 | New prompts at an unseen depth |
 
 ## Depth certification
 
