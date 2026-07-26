@@ -163,7 +163,7 @@ uv run python -c "import duckdb; duckdb.connect('submissions.duckdb').sql('FROM 
 <!-- SUBMISSIONS_TABLE_START -->
 | Architecture | Source | E1 | E5 |
 | --- | --- | ---: | ---: |
-| 1-layer width-64 Transformer | [`a66155a`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/a66155afa3596d7c43ed2813d45299d4f833d173) | [3.83%](https://onelayerdeeper.ai/submissions/27071dce-9e87-4a51-800e-12c4b16b6f5b) | — |
+| 1-layer width-64 Transformer | [`a66155a`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/a66155afa3596d7c43ed2813d45299d4f833d173) | [3.83%](https://onelayerdeeper.ai/submissions/27071dce-9e87-4a51-800e-12c4b16b6f5b) | [0.33%](https://onelayerdeeper.ai/submissions/78524f0b-3f59-4ba3-abe7-1ac4613a205d) |
 | 12-layer width-768 Transformer | [`655c650`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/655c650bfcd5a460c9f18089bb58e91ea6622acd) | [1.33%](https://onelayerdeeper.ai/submissions/092923b6-28f2-47ee-9d18-ea7b8c156854) | — |
 | 4-layer width-256 Transformer | [`6630a45`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/6630a4507c8d9a7bb33d7034210bd96e50136ce2) | [4.33%](https://onelayerdeeper.ai/submissions/cb2a48ac-a331-4d6e-8612-72d1eb15f0ac) | — |
 | 2-layer width-128 Transformer | [`4ac12ae`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/4ac12ae68373c55ed3dd30b827fb535688ed9276) | [5.17%](https://onelayerdeeper.ai/submissions/7362f0f8-9b9c-41a5-8d34-2cb3550ccd09) | — |
