@@ -139,6 +139,7 @@ Commit the exact `submission.py` that should be evaluated, then submit it and re
 
 ```bash
 uv run scripts/submit_and_record.py \
+  --architecture gpt2-small \
   --note "gpt-2 small" \
   --tier easy \
   --dataset e1
@@ -148,30 +149,28 @@ The command requires a clean Git worktree so the recorded commit identifies the 
 It runs `one-layer submit submission.py --wait`, streams the remote status, writes one row to `submissions.duckdb`, and regenerates the table below.
 Commit the resulting database and README changes after each run.
 
-The DuckDB `submissions` table is the source of truth.
-Each row stores the experiment number, note, source commit, source hash, validation and queue state, tier, dataset, remaining daily attempts, hosted IDs, final status and score, depth metrics, command exit code, and complete CLI output.
+The DuckDB database is the source of truth.
+The `architectures` table defines stable architecture identities and canonical source commits, while each `submissions` row stores one dataset run with its experiment number, note, source hash, validation and queue state, hosted IDs, final status and score, depth metrics, command exit code, and complete CLI output.
+The table below shows the latest recorded E1 and E5 result for each architecture.
 Inspect it with:
 
 ```bash
 uv run python -c "import duckdb; duckdb.connect('submissions.duckdb').sql('FROM submissions').show()"
 ```
 
-## Submission history
+## Architecture results
 
 <!-- SUBMISSIONS_TABLE_START -->
-| Number | Note | Commit | Status | Score |
-| ---: | --- | --- | --- | ---: |
-| 1 | official test submission file | [`a66155a`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/a66155afa3596d7c43ed2813d45299d4f833d173) | succeeded | 3.83% |
-| 2 | gpt-2 small | [`655c650`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/655c650bfcd5a460c9f18089bb58e91ea6622acd) | succeeded | 1.33% |
-| 3 | 4-layer width-256, warmup+cosine, dropout+label smoothing | [`6630a45`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/6630a4507c8d9a7bb33d7034210bd96e50136ce2) | succeeded | 4.33% |
-| 4 | 2-layer width-128, 80 steps, warmup+cosine, dropout+label smoothing | [`4ac12ae`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/4ac12ae68373c55ed3dd30b827fb535688ed9276) | succeeded | 5.17% |
-| 5 | tied second block repeated exactly T, 80 steps | [`2340c1c`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/2340c1c6224c992c0fc91177186b670ecb7aab2d) | failed | — |
-| 6 | tied second block repeated exactly T, 80 steps | [`6c91e99`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/6c91e99a671d9edaba0571bfe2d52c516157f999) | succeeded | 4.33% |
-| 7 | T2MLR gated middle cache, 80 steps | [`47646db`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/47646db668748230211074d0463b75aa2f91c133) | succeeded | 4.17% |
-| 8 | soft Thoughtbubbles + functional depth encoding, 80 steps | [`a408a7d`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/a408a7dd27ae4648571102948be2f098429dd8aa) | succeeded | 5.50% |
-| 9 | single-layer width-128 bidirectional simple RNN | [`77788bd`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/77788bde51bff99006d3512cfad34e3f62a3856f) | succeeded | 6.33% |
-| 10 | hierarchical N/x/T encoders + T-step tied GRU | [`61a83cc`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/61a83ccb7b7d08211e1eb4db53af5f1f52ea2452) | succeeded | 6.00% |
-| 11 | hierarchical N/x/T + T-step GRU, beta2=0.999 | [`d0d326f`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/d0d326fc4aee81c9c9eb6d4b9298db3aabb2d7b7) | succeeded | 6.00% |
-| 12 | explicit residue-state Transformer on E1 | [`628703b`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/628703bfd11f748a66e65d0dd88f30178b7348c4) | succeeded | 7.83% |
-| 13 | explicit residue-state Transformer on E5 | [`89ba4ef`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/89ba4efb7db8e14b3e2a0faebb1023e74439672d) | succeeded | 0.33% |
+| Architecture | Source | E1 | E5 |
+| --- | --- | ---: | ---: |
+| 1-layer width-64 Transformer | [`a66155a`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/a66155afa3596d7c43ed2813d45299d4f833d173) | [3.83%](https://onelayerdeeper.ai/submissions/27071dce-9e87-4a51-800e-12c4b16b6f5b) | — |
+| 12-layer width-768 Transformer | [`655c650`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/655c650bfcd5a460c9f18089bb58e91ea6622acd) | [1.33%](https://onelayerdeeper.ai/submissions/092923b6-28f2-47ee-9d18-ea7b8c156854) | — |
+| 4-layer width-256 Transformer | [`6630a45`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/6630a4507c8d9a7bb33d7034210bd96e50136ce2) | [4.33%](https://onelayerdeeper.ai/submissions/cb2a48ac-a331-4d6e-8612-72d1eb15f0ac) | — |
+| 2-layer width-128 Transformer | [`4ac12ae`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/4ac12ae68373c55ed3dd30b827fb535688ed9276) | [5.17%](https://onelayerdeeper.ai/submissions/7362f0f8-9b9c-41a5-8d34-2cb3550ccd09) | — |
+| T-step tied width-128 Transformer | [`6c91e99`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/6c91e99a671d9edaba0571bfe2d52c516157f999) | [4.33%](https://onelayerdeeper.ai/submissions/e5bc8c6c-5d66-4a71-982c-3479de825133) | — |
+| T²MLR gated-cache Transformer | [`47646db`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/47646db668748230211074d0463b75aa2f91c133) | [4.17%](https://onelayerdeeper.ai/submissions/a6eb3958-62c8-401e-84d2-87ca895b23ef) | — |
+| Soft Thoughtbubbles Transformer | [`a408a7d`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/a408a7dd27ae4648571102948be2f098429dd8aa) | [5.50%](https://onelayerdeeper.ai/submissions/ce357172-8f06-4be9-a224-e482f8bd0eee) | — |
+| Single-layer width-128 bidirectional RNN | [`77788bd`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/77788bde51bff99006d3512cfad34e3f62a3856f) | [6.33%](https://onelayerdeeper.ai/submissions/de736b5d-8d32-45a3-ae56-3a6e0899e0c7) | — |
+| Hierarchical T-step GRU | [`d0d326f`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/d0d326fc4aee81c9c9eb6d4b9298db3aabb2d7b7) | [6.00%](https://onelayerdeeper.ai/submissions/01694dfb-5660-4045-bc55-882e51a5bb57) | — |
+| Explicit residue-state Transformer | [`628703b`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/628703bfd11f748a66e65d0dd88f30178b7348c4) | [7.83%](https://onelayerdeeper.ai/submissions/ab93ce56-b9bf-49e8-a0a1-42af6d15224c) | [0.33%](https://onelayerdeeper.ai/submissions/db9928d7-bee6-48c7-9d6d-ee99d44232e1) |
 <!-- SUBMISSIONS_TABLE_END -->

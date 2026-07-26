@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
-from pathlib import Path
 import sys
 import unittest
-
+from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "submit_and_record.py"
 SPEC = importlib.util.spec_from_file_location("submit_and_record", SCRIPT)
@@ -66,6 +65,16 @@ class ParseOutputTests(unittest.TestCase):
         self.assertEqual(result.status, "failed")
         self.assertEqual(result.tier, "medium")
         self.assertEqual(result.dataset_id, "m1")
+
+
+class ScoreCellTests(unittest.TestCase):
+    def test_formats_missing_failed_and_successful_results(self) -> None:
+        self.assertEqual(TRACKER.score_cell(None, None, None), "—")
+        self.assertEqual(TRACKER.score_cell("failed", None, None), "failed")
+        self.assertEqual(
+            TRACKER.score_cell("succeeded", 7.83, "https://example.com/result"),
+            "[7.83%](https://example.com/result)",
+        )
 
 
 if __name__ == "__main__":

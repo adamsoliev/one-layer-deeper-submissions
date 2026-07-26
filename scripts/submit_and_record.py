@@ -4,17 +4,16 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
-from datetime import datetime, timezone
 import hashlib
-from pathlib import Path
 import re
 import shlex
 import subprocess
 import sys
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 
 import duckdb
-
 
 ROOT = Path(__file__).resolve().parents[1]
 DATABASE_PATH = ROOT / "submissions.duckdb"
@@ -173,6 +172,7 @@ def read_existing_output(args: argparse.Namespace) -> tuple[str, int, str]:
 
 def persist(
     *,
+    architecture_key: str,
     note: str,
     commit_hash: str,
     requested_tier: str,
@@ -185,22 +185,29 @@ def persist(
     file_sha256 = hashlib.sha256(SUBMISSION_PATH.read_bytes()).hexdigest()
     with duckdb.connect(str(DATABASE_PATH)) as connection:
         connection.execute(SCHEMA_PATH.read_text(encoding="utf-8"))
+        architecture_exists = connection.execute(
+            "SELECT count(*) FROM architectures WHERE architecture_key = ?",
+            [architecture_key],
+        ).fetchone()[0]
+        if not architecture_exists:
+            raise RuntimeError(f"unknown architecture key: {architecture_key}")
         number = connection.execute(
             "SELECT coalesce(max(number), 0) + 1 FROM submissions"
         ).fetchone()[0]
         connection.execute(
             """
             INSERT INTO submissions (
-                number, note, commit_hash, file_path, file_sha256, submitted_at,
-                valid, validated_bytes, queued, tier, dataset_id, dataset_label,
-                attempts_left, submission_id, view_url, status, score_pct, max_t,
-                ood_n_max_t, suite, run_id, modal_call_id, exit_code, command,
-                raw_output
+                number, architecture_key, note, commit_hash, file_path,
+                file_sha256, submitted_at, valid, validated_bytes, queued, tier,
+                dataset_id, dataset_label, attempts_left, submission_id,
+                view_url, status, score_pct, max_t, ood_n_max_t, suite, run_id,
+                modal_call_id, exit_code, command, raw_output
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                      ?, ?, ?, ?, ?, ?)
+                      ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 number,
+                architecture_key,
                 note,
                 commit_hash,
                 SUBMISSION_PATH.name,
@@ -234,28 +241,55 @@ def markdown_escape(value: str) -> str:
     return value.replace("|", r"\|").replace("\n", " ")
 
 
+def score_cell(status: str | None, score_pct: float | None, view_url: str | None) -> str:
+    if status is None:
+        return "—"
+    if score_pct is None:
+        return markdown_escape(status)
+    score = f"{score_pct:.2f}%"
+    return score if view_url is None else f"[{score}]({view_url})"
+
+
 def refresh_readme() -> None:
     with duckdb.connect(str(DATABASE_PATH), read_only=True) as connection:
         rows = connection.execute(
             """
-            SELECT number, note, commit_hash, status, score_pct
-            FROM submissions
-            ORDER BY number
+            SELECT
+                architecture_label,
+                source_commit,
+                e1_status,
+                e1_score_pct,
+                e1_view_url,
+                e5_status,
+                e5_score_pct,
+                e5_view_url
+            FROM architecture_results
+            ORDER BY display_order
             """
         ).fetchall()
 
     table = [
-        "| Number | Note | Commit | Status | Score |",
-        "| ---: | --- | --- | --- | ---: |",
+        "| Architecture | Source | E1 | E5 |",
+        "| --- | --- | ---: | ---: |",
     ]
-    for number, note, commit_hash, status, score_pct in rows:
+    for (
+        architecture_label,
+        source_commit,
+        e1_status,
+        e1_score_pct,
+        e1_view_url,
+        e5_status,
+        e5_score_pct,
+        e5_view_url,
+    ) in rows:
         commit = (
-            f"[`{commit_hash[:7]}`]({REPOSITORY_URL}/commit/{commit_hash})"
+            f"[`{source_commit[:7]}`]({REPOSITORY_URL}/commit/{source_commit})"
         )
-        score = "—" if score_pct is None else f"{score_pct:.2f}%"
+        e1_score = score_cell(e1_status, e1_score_pct, e1_view_url)
+        e5_score = score_cell(e5_status, e5_score_pct, e5_view_url)
         table.append(
-            f"| {number} | {markdown_escape(note)} | {commit} | "
-            f"{status} | {score} |"
+            f"| {markdown_escape(architecture_label)} | {commit} | "
+            f"{e1_score} | {e5_score} |"
         )
 
     readme = README_PATH.read_text(encoding="utf-8")
@@ -273,6 +307,11 @@ def refresh_readme() -> None:
 def make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Submit the committed model and record its complete result."
+    )
+    parser.add_argument(
+        "--architecture",
+        required=True,
+        help="stable architecture key from the architectures table",
     )
     parser.add_argument("--note", required=True, help="experiment description")
     parser.add_argument(
@@ -300,6 +339,7 @@ def main() -> int:
     else:
         output, exit_code, command = submit(args)
     number = persist(
+        architecture_key=args.architecture,
         note=args.note,
         commit_hash=commit_hash,
         requested_tier=args.tier,
