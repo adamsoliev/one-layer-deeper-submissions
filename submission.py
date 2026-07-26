@@ -1,4 +1,4 @@
-"""GPT-2 small-sized submission for One Layer Deeper."""
+"""Regularized intermediate Transformer for One Layer Deeper."""
 
 from __future__ import annotations
 
@@ -17,10 +17,13 @@ from benchmark import (
 )
 
 
-WIDTH = 768
-NUM_HEADS = 12
-NUM_LAYERS = 12
-MLP_WIDTH = 3072
+WIDTH = 256
+NUM_HEADS = 8
+NUM_LAYERS = 4
+MLP_WIDTH = 1024
+DROPOUT = 0.1
+WARMUP_STEPS = 20
+SCHEDULE_STEPS = 220
 
 
 class Config:
@@ -29,7 +32,7 @@ class Config:
         self.max_seq_len = max_seq_len
 
 
-class GPT2Block(nn.Module):
+class TransformerBlock(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.attention_norm = nn.LayerNorm(WIDTH)
@@ -70,25 +73,32 @@ class GPT2Block(nn.Module):
             attn_mask=allowed,
         )
         hidden = hidden.transpose(1, 2).contiguous().view(batch, length, WIDTH)
-        hidden = residual + self.attention_out(hidden)
-        hidden = hidden + self.mlp_down(
-            F.gelu(self.mlp_up(self.mlp_norm(hidden)), approximate="tanh")
+        hidden = residual + F.dropout(
+            self.attention_out(hidden),
+            p=DROPOUT,
+            training=self.training,
+        )
+        hidden = hidden + F.dropout(
+            self.mlp_down(
+                F.gelu(self.mlp_up(self.mlp_norm(hidden)), approximate="tanh")
+            ),
+            p=DROPOUT,
+            training=self.training,
         )
         return hidden
 
 
-class GPT2Small(nn.Module):
-    """GPT-2 small dimensions with evaluator-provided bidirectional attention."""
+class IntermediateTransformer(nn.Module):
+    """Four-layer model with explicit regularization for the small E1 dataset."""
 
     def __init__(self, spec: ModelSpec) -> None:
         super().__init__()
         self.config = Config(spec.vocab_size, spec.max_seq_len)
         self.token_embedding = nn.Embedding(spec.vocab_size, WIDTH)
         self.position_embedding = nn.Embedding(spec.max_seq_len, WIDTH)
-        self.blocks = nn.ModuleList(GPT2Block() for _ in range(NUM_LAYERS))
+        self.blocks = nn.ModuleList(TransformerBlock() for _ in range(NUM_LAYERS))
         self.final_norm = nn.LayerNorm(WIDTH)
         self.output = nn.Linear(WIDTH, spec.vocab_size, bias=False)
-        self.output.weight = self.token_embedding.weight
         self.apply(self._initialize)
 
         residual_std = 0.02 / math.sqrt(2 * NUM_LAYERS)
@@ -111,14 +121,15 @@ class GPT2Small(nn.Module):
         length = input_ids.shape[1]
         positions = torch.arange(length, device=input_ids.device)
         hidden = self.token_embedding(input_ids) + self.position_embedding(positions)
+        hidden = F.dropout(hidden, p=DROPOUT, training=self.training)
         for block in self.blocks:
             hidden = block(hidden, attention_mask)
         logits = self.output(self.final_norm(hidden))
         return logits, None
 
 
-def build_model(spec: ModelSpec) -> GPT2Small:
-    model = GPT2Small(spec)
+def build_model(spec: ModelSpec) -> IntermediateTransformer:
+    model = IntermediateTransformer(spec)
     assert_model_state(model, spec)
     return model
 
@@ -129,15 +140,35 @@ def build_optimizer(
 ) -> OptimizerBundle:
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=6e-4,
+        lr=1e-3,
         betas=(0.9, 0.95),
         weight_decay=0.1,
         capturable=spec.device_type == "cuda",
     )
-    return OptimizerBundle(optimizer)
+
+    def learning_rate_multiplier(step: int) -> float:
+        if step < WARMUP_STEPS:
+            return (step + 1) / WARMUP_STEPS
+        progress = min(
+            (step - WARMUP_STEPS) / (SCHEDULE_STEPS - WARMUP_STEPS),
+            1.0,
+        )
+        return 0.1 + 0.9 * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer,
+        learning_rate_multiplier,
+    )
+    return OptimizerBundle(optimizer, scheduler)
+
+
+def training_loss(logits: Tensor, labels: Tensor, auxiliary: object) -> Tensor:
+    del auxiliary
+    return F.cross_entropy(logits, labels, label_smoothing=0.05)
 
 
 SUBMISSION = Submission(
     build_model=build_model,
     build_optimizer=build_optimizer,
+    training_loss=training_loss,
 )
