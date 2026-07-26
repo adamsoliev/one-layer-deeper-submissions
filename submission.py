@@ -1,4 +1,4 @@
-"""T2MLR-style latent recurrence for One Layer Deeper."""
+"""Soft Thoughtbubbles with length-conditioned recurrent depth."""
 
 from __future__ import annotations
 
@@ -27,6 +27,8 @@ SCHEDULE_STEPS = 80
 T_TOKEN_ID = 4
 DIGIT_OFFSET = 7
 MAX_RECURRENT_STEPS = 64
+NUM_BUBBLES = 2
+DEPTH_FEATURES = 6
 
 
 class Config:
@@ -117,8 +119,40 @@ class T2MLRFusion(nn.Module):
         return current + current_update + recurrent_update
 
 
-class IntermediateTransformer(nn.Module):
-    """Use T2MLR fusion and a temporal residual for exactly T latent steps."""
+class DepthEncoding(nn.Module):
+    """Project extrapolatable recurrence-progress features into model space."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.projection = nn.Sequential(
+            nn.Linear(DEPTH_FEATURES, WIDTH),
+            nn.SiLU(),
+            nn.Linear(WIDTH, WIDTH),
+        )
+
+    def forward(self, time_steps: Tensor, step: int) -> Tensor:
+        total = time_steps.to(dtype=torch.float32).clamp_min(1.0)
+        current = torch.full_like(total, step + 1, dtype=torch.float32)
+        progress = (current / total).clamp(max=1.0)
+        remaining = ((total - current).clamp_min(0.0) / total).clamp(max=1.0)
+        absolute = current / MAX_RECURRENT_STEPS
+        total_scale = torch.log2(total + 1.0) / math.log2(MAX_RECURRENT_STEPS + 1.0)
+        features = torch.stack(
+            (
+                progress,
+                remaining,
+                absolute,
+                total_scale,
+                torch.sin(math.pi * progress),
+                torch.cos(math.pi * progress),
+            ),
+            dim=-1,
+        )
+        return self.projection(features).to(dtype=self.projection[0].weight.dtype)
+
+
+class ThoughtbubbleTransformer(nn.Module):
+    """Run a scored pair of latent streams through exactly T tied steps."""
 
     def __init__(self, spec: ModelSpec) -> None:
         super().__init__()
@@ -127,10 +161,14 @@ class IntermediateTransformer(nn.Module):
         self.position_embedding = nn.Embedding(spec.max_seq_len, WIDTH)
         self.blocks = nn.ModuleList(TransformerBlock() for _ in range(NUM_LAYERS))
         self.fusion = T2MLRFusion()
+        self.depth_encoding = DepthEncoding()
+        self.bubble_embedding = nn.Parameter(torch.empty(NUM_BUBBLES, WIDTH))
+        self.bubble_score = nn.Linear(WIDTH, 1)
         self.cache_norm = nn.RMSNorm(WIDTH)
         self.final_norm = nn.LayerNorm(WIDTH)
         self.output = nn.Linear(WIDTH, spec.vocab_size, bias=False)
         self.apply(self._initialize)
+        nn.init.normal_(self.bubble_embedding, mean=0.0, std=0.02)
 
         residual_std = 0.02 / math.sqrt(2 * NUM_LAYERS)
         for block in self.blocks:
@@ -154,20 +192,62 @@ class IntermediateTransformer(nn.Module):
         hidden = self.token_embedding(input_ids) + self.position_embedding(positions)
         hidden = F.dropout(hidden, p=DROPOUT, training=self.training)
         current = self.blocks[0](hidden, attention_mask)
-        recurrent_cache = torch.zeros_like(current)
-        final_middle = current
+        bubbles = current[:, None, :, :] + self.bubble_embedding[None, :, None, :]
+        recurrent_cache = torch.zeros_like(bubbles)
+        final_middle = bubbles
+        bubble_logits = self.bubble_score(bubbles).squeeze(-1)
 
         time_steps = self._decode_time_steps(input_ids)
         recurrent_steps = 3 if self.training else MAX_RECURRENT_STEPS
         for step in range(recurrent_steps):
-            fused = self.fusion(current, recurrent_cache)
-            middle = self.blocks[1](fused, attention_mask)
-            updated_cache = self.cache_norm(middle + recurrent_cache)
-            active = (time_steps > step).view(-1, 1, 1)
+            depth = self.depth_encoding(time_steps, step)[:, None, None, :]
+            expanded_current = current[:, None, :, :].expand_as(recurrent_cache)
+            fused = self.fusion(expanded_current, recurrent_cache)
+            bubble_weights = torch.softmax(bubble_logits, dim=1)
+            scored = fused + self.bubble_embedding[None, :, None, :] + depth
+            scored = scored * (0.5 + bubble_weights[..., None])
+
+            batch, _, length, _ = scored.shape
+            flat_scored = scored.reshape(
+                batch,
+                NUM_BUBBLES * length,
+                WIDTH,
+            )
+            flat_mask = None
+            if attention_mask is not None:
+                flat_mask = (
+                    attention_mask[:, None, :]
+                    .expand(
+                        batch,
+                        NUM_BUBBLES,
+                        length,
+                    )
+                    .reshape(batch, NUM_BUBBLES * length)
+                )
+            middle = self.blocks[1](flat_scored, flat_mask).reshape(
+                batch,
+                NUM_BUBBLES,
+                length,
+                WIDTH,
+            )
+            candidate_logits = bubble_logits + self.bubble_score(middle).squeeze(-1)
+            candidate_weights = torch.softmax(candidate_logits, dim=1)
+            updated_cache = self.cache_norm(
+                recurrent_cache + candidate_weights[..., None] * middle
+            )
+            active = (time_steps > step).view(-1, 1, 1, 1)
+            active_scores = active.squeeze(-1)
             recurrent_cache = torch.where(active, updated_cache, recurrent_cache)
             final_middle = torch.where(active, middle, final_middle)
+            bubble_logits = torch.where(
+                active_scores,
+                candidate_logits,
+                bubble_logits,
+            )
 
-        hidden = self.blocks[2](final_middle, attention_mask)
+        bubble_weights = torch.softmax(bubble_logits, dim=1)
+        merged = (bubble_weights[..., None] * final_middle).sum(dim=1)
+        hidden = self.blocks[2](merged, attention_mask)
         logits = self.output(self.final_norm(hidden))
         return logits, None
 
@@ -192,8 +272,8 @@ class IntermediateTransformer(nn.Module):
         return time_steps.clamp(min=1, max=MAX_RECURRENT_STEPS)
 
 
-def build_model(spec: ModelSpec) -> IntermediateTransformer:
-    model = IntermediateTransformer(spec)
+def build_model(spec: ModelSpec) -> ThoughtbubbleTransformer:
+    model = ThoughtbubbleTransformer(spec)
     assert_model_state(model, spec)
     return model
 
