@@ -17,13 +17,13 @@ from benchmark import (
 )
 
 
-WIDTH = 256
-NUM_HEADS = 8
-NUM_LAYERS = 4
-MLP_WIDTH = 1024
+WIDTH = 128
+NUM_HEADS = 4
+NUM_LAYERS = 2
+MLP_WIDTH = 512
 DROPOUT = 0.1
-WARMUP_STEPS = 20
-SCHEDULE_STEPS = 220
+WARMUP_STEPS = 10
+SCHEDULE_STEPS = 80
 
 
 class Config:
@@ -89,7 +89,7 @@ class TransformerBlock(nn.Module):
 
 
 class IntermediateTransformer(nn.Module):
-    """Four-layer model with explicit regularization for the small E1 dataset."""
+    """Two-layer model with explicit regularization and early stopping."""
 
     def __init__(self, spec: ModelSpec) -> None:
         super().__init__()
@@ -171,4 +171,5 @@ SUBMISSION = Submission(
     build_model=build_model,
     build_optimizer=build_optimizer,
     training_loss=training_loss,
+    max_steps=SCHEDULE_STEPS,
 )
