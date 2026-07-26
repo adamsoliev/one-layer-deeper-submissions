@@ -172,4 +172,5 @@ uv run python -c "import duckdb; duckdb.connect('submissions.duckdb').sql('FROM 
 | 9 | single-layer width-128 bidirectional simple RNN | [`77788bd`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/77788bde51bff99006d3512cfad34e3f62a3856f) | succeeded | 6.33% |
 | 10 | hierarchical N/x/T encoders + T-step tied GRU | [`61a83cc`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/61a83ccb7b7d08211e1eb4db53af5f1f52ea2452) | succeeded | 6.00% |
 | 11 | hierarchical N/x/T + T-step GRU, beta2=0.999 | [`d0d326f`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/d0d326fc4aee81c9c9eb6d4b9298db3aabb2d7b7) | succeeded | 6.00% |
+| 12 | explicit residue-state Transformer on E1 | [`628703b`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/628703bfd11f748a66e65d0dd88f30178b7348c4) | succeeded | 7.83% |
 <!-- SUBMISSIONS_TABLE_END -->
