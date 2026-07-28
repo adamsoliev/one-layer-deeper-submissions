@@ -16,7 +16,8 @@ INSERT INTO architectures VALUES
     ('simple-rnn', 'Single-layer width-128 bidirectional RNN', '77788bde51bff99006d3512cfad34e3f62a3856f', 8),
     ('hierarchical-gru', 'Hierarchical T-step GRU', 'd0d326fc4aee81c9c9eb6d4b9298db3aabb2d7b7', 9),
     ('explicit-residue', 'Explicit residue-state Transformer', '628703bfd11f748a66e65d0dd88f30178b7348c4', 10),
-    ('moe-64-5m', '64-expert width-98 MoE (5M)', 'a6767129f8316591f319b19d0e40c3085fb87386', 11)
+    ('moe-64-5m', '64-expert width-98 MoE (5M)', 'a6767129f8316591f319b19d0e40c3085fb87386', 11),
+    ('moe-64-50m', '64-expert width-312 MoE (50M)', '1eccfab7c309fc16c87c2ad381efc6407b84b809', 12)
 ON CONFLICT (architecture_key) DO UPDATE SET
     architecture_label = excluded.architecture_label,
     source_commit = excluded.source_commit,
