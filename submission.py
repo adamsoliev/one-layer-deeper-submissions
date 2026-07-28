@@ -14,9 +14,9 @@ from benchmark import (
 from torch import Tensor, nn
 
 NUM_EXPERTS = 64
-WIDTH = 312
-EXPERT_HIDDEN_WIDTH = 1248
-MODEL_STATE_LIMIT = 50_000_000
+WIDTH = 98
+EXPERT_HIDDEN_WIDTH = 395
+MODEL_STATE_LIMIT = 5_000_000
 ROUTER_AUX_LOSS_WEIGHT = 0.01
 
 
@@ -49,6 +49,7 @@ class SparseMoE(nn.Module):
         self.experts = nn.ModuleList(Expert() for _ in range(NUM_EXPERTS))
         self.output = nn.Linear(WIDTH, spec.vocab_size)
         self.apply(self._initialize)
+        self.output.weight = self.embedding.weight
 
     @staticmethod
     def _initialize(module: nn.Module) -> None:
