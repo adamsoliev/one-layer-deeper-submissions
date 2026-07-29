@@ -24,6 +24,5 @@
 
 6. Output.
    - Not autoregressive: carry logic, etc. must happen across model depth / global attention.
-   - Not autoregressive.
    - Token-level probability vs. whole-output probability (cross-entropy loss).
    - Loss should include stability of previous rows (?).
