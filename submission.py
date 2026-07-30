@@ -1,4 +1,4 @@
-"""Stochastic-memory residue recurrence for One Layer Deeper."""
+"""Reflection-invariant residue recurrence for One Layer Deeper."""
 
 from __future__ import annotations
 
@@ -22,7 +22,6 @@ RESIDUE_CODES = 2_048
 PAIR_MEMORY_SIZE = 131_071
 PAIR_MEMORY_WIDTH = 64
 MEMORY_TOP_K = 8
-MEMORY_DROPOUT = 0.5
 MAX_OUTPUT_DIGITS = 4
 TRAIN_BATCH_SIZE = 512
 MAX_TRAINING_STEPS = 2_000
@@ -85,7 +84,7 @@ class SquaringTransition(nn.Module):
 
 
 class CanonicalResidueModel(nn.Module):
-    """Train a shared transition while stochastically bypassing pair memory."""
+    """Share transition state and memory across the r ↔ N-r symmetry."""
 
     def __init__(self, spec: ModelSpec) -> None:
         super().__init__()
@@ -162,12 +161,22 @@ class CanonicalResidueModel(nn.Module):
         active_steps = state.new_zeros(state.shape[0])
         maximum_steps = MAX_TRAIN_T if self.training else MAX_EVAL_T
         for step in range(maximum_steps):
+            transition_state = self._symmetric_state(
+                state,
+                modulus_index,
+                state_indices,
+                state_weights,
+            )
             memory = self._memory_context(
                 modulus_index,
                 state_indices,
                 state_weights,
             )
-            query = self.transition(state, modulus_vector, memory)
+            query = self.transition(
+                transition_state,
+                modulus_vector,
+                memory,
+            )
             candidate, entropy, probabilities = self._canonicalize(query)
             candidate_weights, candidate_indices = probabilities.topk(
                 MEMORY_TOP_K,
@@ -204,25 +213,39 @@ class CanonicalResidueModel(nn.Module):
         residue_indices: Tensor,
         residue_weights: Tensor,
     ) -> Tensor:
+        modulus = modulus.clamp_min(1)[:, None]
+        residues = residue_indices % modulus
+        reflected = (modulus - residues) % modulus
+        representatives = torch.minimum(residues, reflected)
         keys = (
-            modulus[:, None] * RESIDUE_CODES + residue_indices
+            modulus * RESIDUE_CODES + representatives
         ) % PAIR_MEMORY_SIZE
         memories = self.pair_memory(keys)
         memory = (
             memories * residue_weights.to(memories.dtype)[..., None]
         ).sum(dim=1)
-        memory = self.memory_projection(memory)
-        if self.training:
-            keep = (
-                torch.rand(
-                    memory.shape[0],
-                    1,
-                    device=memory.device,
-                )
-                >= MEMORY_DROPOUT
-            )
-            memory = memory * keep.to(memory.dtype) / (1.0 - MEMORY_DROPOUT)
-        return memory
+        return self.memory_projection(memory)
+
+    def _symmetric_state(
+        self,
+        state: Tensor,
+        modulus: Tensor,
+        residue_indices: Tensor,
+        residue_weights: Tensor,
+    ) -> Tensor:
+        modulus = modulus.clamp_min(1)[:, None]
+        residues = residue_indices % modulus
+        reflected = ((modulus - residues) % modulus).clamp(
+            max=MAX_VALUE - 1,
+        )
+        reflected_codes = self.residue_norm(
+            self.residue_embedding(reflected),
+        )
+        reflected_state = (
+            reflected_codes
+            * residue_weights.to(reflected_codes.dtype)[..., None]
+        ).sum(dim=1)
+        return self.residue_norm(state + reflected_state)
 
     def _canonicalize(
         self,
