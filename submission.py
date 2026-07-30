@@ -1,4 +1,4 @@
-"""Canonical-state squaring recurrence for One Layer Deeper."""
+"""Associative-memory residue recurrence for One Layer Deeper."""
 
 from __future__ import annotations
 
@@ -19,6 +19,9 @@ WIDTH = 256
 TRANSITION_WIDTH = 1_024
 MAX_VALUE = 8_192
 RESIDUE_CODES = 2_048
+PAIR_MEMORY_SIZE = 131_071
+PAIR_MEMORY_WIDTH = 64
+MEMORY_TOP_K = 8
 MAX_OUTPUT_DIGITS = 4
 TRAIN_BATCH_SIZE = 512
 MAX_TRAINING_STEPS = 2_000
@@ -50,22 +53,28 @@ class RMSNorm(nn.Module):
 
 
 class SquaringTransition(nn.Module):
-    """Produce a codebook query from one residue and the injected modulus."""
+    """Produce a codebook query from residue, modulus, and learned memory."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.feature_norm = RMSNorm(4 * WIDTH)
-        self.left = nn.Linear(4 * WIDTH, TRANSITION_WIDTH)
-        self.right = nn.Linear(4 * WIDTH, TRANSITION_WIDTH)
+        self.feature_norm = RMSNorm(5 * WIDTH)
+        self.left = nn.Linear(5 * WIDTH, TRANSITION_WIDTH)
+        self.right = nn.Linear(5 * WIDTH, TRANSITION_WIDTH)
         self.query = nn.Linear(TRANSITION_WIDTH, WIDTH)
 
-    def forward(self, state: Tensor, modulus: Tensor) -> Tensor:
+    def forward(
+        self,
+        state: Tensor,
+        modulus: Tensor,
+        memory: Tensor,
+    ) -> Tensor:
         features = torch.cat(
             (
                 state,
                 modulus,
                 state * modulus,
                 state - modulus,
+                memory,
             ),
             dim=-1,
         )
@@ -75,13 +84,22 @@ class SquaringTransition(nn.Module):
 
 
 class CanonicalResidueModel(nn.Module):
-    """Apply one tied learned squaring transition exactly T times."""
+    """Apply one memory-augmented squaring transition exactly T times."""
 
     def __init__(self, spec: ModelSpec) -> None:
         super().__init__()
         self.config = Config(spec.vocab_size, spec.max_seq_len)
         self.modulus_embedding = nn.Embedding(MAX_VALUE, WIDTH)
         self.residue_embedding = nn.Embedding(MAX_VALUE, WIDTH)
+        self.pair_memory = nn.Embedding(
+            PAIR_MEMORY_SIZE,
+            PAIR_MEMORY_WIDTH,
+        )
+        self.memory_projection = nn.Linear(
+            PAIR_MEMORY_WIDTH,
+            WIDTH,
+            bias=False,
+        )
         self.modulus_norm = RMSNorm(WIDTH)
         self.residue_norm = RMSNorm(WIDTH)
         self.query_norm = RMSNorm(WIDTH)
@@ -130,14 +148,46 @@ class CanonicalResidueModel(nn.Module):
         )
 
         state = initial_state
+        state_indices = residue.clamp(max=RESIDUE_CODES - 1)[:, None].expand(
+            -1,
+            MEMORY_TOP_K,
+        )
+        state_weights = state.new_zeros(
+            state.shape[0],
+            MEMORY_TOP_K,
+        )
+        state_weights[:, 0] = 1.0
         entropy_sum = state.new_zeros(state.shape[0])
         active_steps = state.new_zeros(state.shape[0])
         maximum_steps = MAX_TRAIN_T if self.training else MAX_EVAL_T
         for step in range(maximum_steps):
-            query = self.transition(state, modulus_vector)
-            candidate, entropy = self._canonicalize(query)
+            memory = self._memory_context(
+                modulus_index,
+                state_indices,
+                state_weights,
+            )
+            query = self.transition(state, modulus_vector, memory)
+            candidate, entropy, probabilities = self._canonicalize(query)
+            candidate_weights, candidate_indices = probabilities.topk(
+                MEMORY_TOP_K,
+                dim=-1,
+            )
+            candidate_weights = candidate_weights / candidate_weights.sum(
+                dim=-1,
+                keepdim=True,
+            )
             active = time_steps > step
             state = torch.where(active[:, None], candidate, state)
+            state_indices = torch.where(
+                active[:, None],
+                candidate_indices,
+                state_indices,
+            )
+            state_weights = torch.where(
+                active[:, None],
+                candidate_weights,
+                state_weights,
+            )
             entropy_sum = entropy_sum + entropy * active
             active_steps = active_steps + active
 
@@ -147,7 +197,25 @@ class CanonicalResidueModel(nn.Module):
         logits = self._decode_sequence(state, input_ids, attention_mask)
         return logits, (reconstruction_loss, code_entropy)
 
-    def _canonicalize(self, query: Tensor) -> tuple[Tensor, Tensor]:
+    def _memory_context(
+        self,
+        modulus: Tensor,
+        residue_indices: Tensor,
+        residue_weights: Tensor,
+    ) -> Tensor:
+        keys = (
+            modulus[:, None] * RESIDUE_CODES + residue_indices
+        ) % PAIR_MEMORY_SIZE
+        memories = self.pair_memory(keys)
+        memory = (
+            memories * residue_weights.to(memories.dtype)[..., None]
+        ).sum(dim=1)
+        return self.memory_projection(memory)
+
+    def _canonicalize(
+        self,
+        query: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor]:
         query = F.normalize(self.query_norm(query), dim=-1)
         codes = F.normalize(
             self.residue_norm(
@@ -161,7 +229,7 @@ class CanonicalResidueModel(nn.Module):
         entropy = -(probabilities * probabilities.clamp_min(1e-8).log()).sum(
             dim=-1,
         )
-        return self.residue_norm(state), entropy
+        return self.residue_norm(state), entropy, probabilities
 
     def _decode_sequence(
         self,
