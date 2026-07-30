@@ -18,7 +18,8 @@ INSERT INTO architectures VALUES
     ('explicit-residue', 'Explicit residue-state Transformer', '628703bfd11f748a66e65d0dd88f30178b7348c4', 10),
     ('moe-64-5m', '64-expert width-98 MoE (5M)', 'a6767129f8316591f319b19d0e40c3085fb87386', 11),
     ('moe-64-50m', '64-expert width-312 MoE (50M)', '1eccfab7c309fc16c87c2ad381efc6407b84b809', 12),
-    ('moe-64-5m-tied', '64-expert width-98 tied MoE (5M)', '73e3eb5e57fe667ad3bfd141a1aa4e5145df1f5c', 13)
+    ('moe-64-5m-tied', '64-expert width-98 tied MoE (5M)', '73e3eb5e57fe667ad3bfd141a1aa4e5145df1f5c', 13),
+    ('numeric-multiplicative', 'Multiplicative numeric recurrence', '394f4fc429b06488a75422c474aeb63e5c512aec', 14)
 ON CONFLICT (architecture_key) DO UPDATE SET
     architecture_label = excluded.architecture_label,
     source_commit = excluded.source_commit,
