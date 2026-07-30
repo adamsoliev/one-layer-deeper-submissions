@@ -1,4 +1,4 @@
-"""Modulus-masked residue recurrence for One Layer Deeper."""
+"""Stochastic-memory residue recurrence for One Layer Deeper."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ RESIDUE_CODES = 2_048
 PAIR_MEMORY_SIZE = 131_071
 PAIR_MEMORY_WIDTH = 64
 MEMORY_TOP_K = 8
+MEMORY_DROPOUT = 0.5
 MAX_OUTPUT_DIGITS = 4
 TRAIN_BATCH_SIZE = 512
 MAX_TRAINING_STEPS = 2_000
@@ -84,7 +85,7 @@ class SquaringTransition(nn.Module):
 
 
 class CanonicalResidueModel(nn.Module):
-    """Recur only through canonical residue codes that are valid for N."""
+    """Train a shared transition while stochastically bypassing pair memory."""
 
     def __init__(self, spec: ModelSpec) -> None:
         super().__init__()
@@ -167,10 +168,7 @@ class CanonicalResidueModel(nn.Module):
                 state_weights,
             )
             query = self.transition(state, modulus_vector, memory)
-            candidate, entropy, probabilities = self._canonicalize(
-                query,
-                modulus_index,
-            )
+            candidate, entropy, probabilities = self._canonicalize(query)
             candidate_weights, candidate_indices = probabilities.topk(
                 MEMORY_TOP_K,
                 dim=-1,
@@ -213,12 +211,22 @@ class CanonicalResidueModel(nn.Module):
         memory = (
             memories * residue_weights.to(memories.dtype)[..., None]
         ).sum(dim=1)
-        return self.memory_projection(memory)
+        memory = self.memory_projection(memory)
+        if self.training:
+            keep = (
+                torch.rand(
+                    memory.shape[0],
+                    1,
+                    device=memory.device,
+                )
+                >= MEMORY_DROPOUT
+            )
+            memory = memory * keep.to(memory.dtype) / (1.0 - MEMORY_DROPOUT)
+        return memory
 
     def _canonicalize(
         self,
         query: Tensor,
-        modulus: Tensor,
     ) -> tuple[Tensor, Tensor, Tensor]:
         query = F.normalize(self.query_norm(query), dim=-1)
         codes = F.normalize(
@@ -228,17 +236,7 @@ class CanonicalResidueModel(nn.Module):
             dim=-1,
         )
         scale = self.code_log_scale.exp().clamp(max=30.0)
-        similarities = scale * (query @ codes.T)
-        code_values = torch.arange(
-            RESIDUE_CODES,
-            device=query.device,
-        )
-        valid_codes = code_values[None, :] < modulus.clamp_min(1)[:, None]
-        similarities = similarities.masked_fill(
-            ~valid_codes,
-            torch.finfo(similarities.dtype).min,
-        )
-        probabilities = F.softmax(similarities, dim=-1)
+        probabilities = F.softmax(scale * (query @ codes.T), dim=-1)
         state = probabilities @ codes
         entropy = -(probabilities * probabilities.clamp_min(1e-8).log()).sum(
             dim=-1,
