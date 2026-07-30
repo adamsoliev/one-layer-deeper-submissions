@@ -1,4 +1,4 @@
-"""Shallow joint-answer bottleneck for One Layer Deeper."""
+"""Canonical-state squaring recurrence for One Layer Deeper."""
 
 from __future__ import annotations
 
@@ -15,20 +15,23 @@ from benchmark import (
 )
 from torch import Tensor, nn
 
-INPUT_WIDTH = 256
-JOINT_WIDTH = 1_024
-ANSWER_WIDTH = 96
+WIDTH = 256
+TRANSITION_WIDTH = 1_024
 MAX_VALUE = 8_192
-MAX_TIME = 64
+RESIDUE_CODES = 2_048
 MAX_OUTPUT_DIGITS = 4
 TRAIN_BATCH_SIZE = 512
 MAX_TRAINING_STEPS = 2_000
 WARMUP_STEPS = 50
+MAX_TRAIN_T = 3
+MAX_EVAL_T = 8
 PAD_TOKEN_ID = 0
 X_TOKEN_ID = 3
 T_TOKEN_ID = 4
 DIGIT_OFFSET = 7
 NUM_DIGITS = 10
+RECONSTRUCTION_WEIGHT = 0.25
+ENTROPY_WEIGHT = 0.05
 
 
 class Config:
@@ -46,33 +49,50 @@ class RMSNorm(nn.Module):
         return F.rms_norm(hidden, (hidden.shape[-1],), self.weight)
 
 
-class JointAnswerModel(nn.Module):
-    """Map an entire prompt into one narrow code that emits every answer digit."""
+class SquaringTransition(nn.Module):
+    """Produce a codebook query from one residue and the injected modulus."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.feature_norm = RMSNorm(4 * WIDTH)
+        self.left = nn.Linear(4 * WIDTH, TRANSITION_WIDTH)
+        self.right = nn.Linear(4 * WIDTH, TRANSITION_WIDTH)
+        self.query = nn.Linear(TRANSITION_WIDTH, WIDTH)
+
+    def forward(self, state: Tensor, modulus: Tensor) -> Tensor:
+        features = torch.cat(
+            (
+                state,
+                modulus,
+                state * modulus,
+                state - modulus,
+            ),
+            dim=-1,
+        )
+        features = self.feature_norm(features)
+        hidden = F.silu(self.left(features)) * self.right(features)
+        return self.query(hidden)
+
+
+class CanonicalResidueModel(nn.Module):
+    """Apply one tied learned squaring transition exactly T times."""
 
     def __init__(self, spec: ModelSpec) -> None:
         super().__init__()
         self.config = Config(spec.vocab_size, spec.max_seq_len)
-        self.modulus_embedding = nn.Embedding(MAX_VALUE, INPUT_WIDTH)
-        self.residue_embedding = nn.Embedding(MAX_VALUE, INPUT_WIDTH)
-        self.time_embedding = nn.Embedding(MAX_TIME + 1, INPUT_WIDTH)
-        self.scalar_projection = nn.Linear(6, INPUT_WIDTH)
-        self.modulus_norm = RMSNorm(INPUT_WIDTH)
-        self.residue_norm = RMSNorm(INPUT_WIDTH)
-        self.time_norm = RMSNorm(INPUT_WIDTH)
-        self.scalar_norm = RMSNorm(INPUT_WIDTH)
-
-        feature_width = 8 * INPUT_WIDTH
-        self.feature_norm = RMSNorm(feature_width)
-        self.joint_left = nn.Linear(feature_width, JOINT_WIDTH)
-        self.joint_right = nn.Linear(feature_width, JOINT_WIDTH)
-        self.answer_projection = nn.Linear(JOINT_WIDTH, ANSWER_WIDTH)
-        self.answer_norm = RMSNorm(ANSWER_WIDTH)
+        self.modulus_embedding = nn.Embedding(MAX_VALUE, WIDTH)
+        self.residue_embedding = nn.Embedding(MAX_VALUE, WIDTH)
+        self.modulus_norm = RMSNorm(WIDTH)
+        self.residue_norm = RMSNorm(WIDTH)
+        self.query_norm = RMSNorm(WIDTH)
+        self.transition = SquaringTransition()
+        self.code_log_scale = nn.Parameter(torch.tensor(math.log(10.0)))
         self.answer_decoder = nn.Linear(
-            ANSWER_WIDTH,
+            WIDTH,
             MAX_OUTPUT_DIGITS * spec.vocab_size,
         )
         self.apply(self._initialize)
-        nn.init.normal_(self.answer_projection.weight, mean=0.0, std=0.01)
+        nn.init.normal_(self.transition.query.weight, mean=0.0, std=0.01)
 
     @staticmethod
     def _initialize(module: nn.Module) -> None:
@@ -85,7 +105,7 @@ class JointAnswerModel(nn.Module):
         self,
         input_ids: Tensor,
         attention_mask: Tensor | None = None,
-    ) -> tuple[Tensor, None]:
+    ) -> tuple[Tensor, tuple[Tensor, Tensor]]:
         if attention_mask is None:
             attention_mask = input_ids != PAD_TOKEN_ID
         else:
@@ -97,56 +117,63 @@ class JointAnswerModel(nn.Module):
         )
         modulus_index = modulus.clamp(max=MAX_VALUE - 1)
         residue_index = residue.clamp(max=MAX_VALUE - 1)
-        time_index = time_steps.clamp(max=MAX_TIME)
-
         modulus_vector = self.modulus_norm(
             self.modulus_embedding(modulus_index),
         )
-        residue_vector = self.residue_norm(
+        initial_state = self.residue_norm(
             self.residue_embedding(residue_index),
         )
-        time_vector = self.time_norm(self.time_embedding(time_index))
+        reconstruction_loss = self._reconstruction_loss(
+            initial_state,
+            input_ids,
+            attention_mask,
+        )
 
-        modulus_float = modulus.to(dtype=torch.float32)
-        residue_float = residue.to(dtype=torch.float32)
-        time_float = time_steps.to(dtype=torch.float32)
-        scalar_features = torch.stack(
-            (
-                modulus_float / MAX_VALUE,
-                residue_float / MAX_VALUE,
-                time_float / MAX_TIME,
-                torch.log1p(modulus_float) / 10.0,
-                torch.log1p(residue_float) / 10.0,
-                residue_float / modulus_float.clamp_min(1.0),
+        state = initial_state
+        entropy_sum = state.new_zeros(state.shape[0])
+        active_steps = state.new_zeros(state.shape[0])
+        maximum_steps = MAX_TRAIN_T if self.training else MAX_EVAL_T
+        for step in range(maximum_steps):
+            query = self.transition(state, modulus_vector)
+            candidate, entropy = self._canonicalize(query)
+            active = time_steps > step
+            state = torch.where(active[:, None], candidate, state)
+            entropy_sum = entropy_sum + entropy * active
+            active_steps = active_steps + active
+
+        code_entropy = (
+            entropy_sum / active_steps.clamp_min(1.0)
+        ).mean() / math.log(RESIDUE_CODES)
+        logits = self._decode_sequence(state, input_ids, attention_mask)
+        return logits, (reconstruction_loss, code_entropy)
+
+    def _canonicalize(self, query: Tensor) -> tuple[Tensor, Tensor]:
+        query = F.normalize(self.query_norm(query), dim=-1)
+        codes = F.normalize(
+            self.residue_norm(
+                self.residue_embedding.weight[:RESIDUE_CODES],
             ),
             dim=-1,
         )
-        scalar_vector = self.scalar_norm(
-            self.scalar_projection(scalar_features),
-        )
-
-        features = torch.cat(
-            (
-                modulus_vector,
-                residue_vector,
-                time_vector,
-                scalar_vector,
-                modulus_vector * residue_vector,
-                modulus_vector * time_vector,
-                residue_vector * time_vector,
-                modulus_vector * residue_vector * time_vector,
-            ),
+        scale = self.code_log_scale.exp().clamp(max=30.0)
+        probabilities = F.softmax(scale * (query @ codes.T), dim=-1)
+        state = probabilities @ codes
+        entropy = -(probabilities * probabilities.clamp_min(1e-8).log()).sum(
             dim=-1,
         )
-        features = self.feature_norm(features)
-        joint = F.silu(self.joint_left(features)) * self.joint_right(features)
-        answer = self.answer_norm(self.answer_projection(joint))
-        digit_logits = self.answer_decoder(answer).view(
+        return self.residue_norm(state), entropy
+
+    def _decode_sequence(
+        self,
+        state: Tensor,
+        input_ids: Tensor,
+        attention_mask: Tensor,
+    ) -> Tensor:
+        digit_logits = self.answer_decoder(state).view(
             input_ids.shape[0],
             MAX_OUTPUT_DIGITS,
             self.config.vocab_size,
         )
-
         length = input_ids.shape[1]
         positions = torch.arange(length, device=input_ids.device)[None, :]
         valid_lengths = attention_mask.long().sum(dim=1, keepdim=True)
@@ -158,8 +185,45 @@ class JointAnswerModel(nn.Module):
             input_ids.shape[0],
             device=input_ids.device,
         )[:, None]
-        logits = digit_logits[batch_indices, answer_slots]
-        return logits, None
+        return digit_logits[batch_indices, answer_slots]
+
+    def _reconstruction_loss(
+        self,
+        initial_state: Tensor,
+        input_ids: Tensor,
+        attention_mask: Tensor,
+    ) -> Tensor:
+        length = input_ids.shape[1]
+        positions = torch.arange(length, device=input_ids.device)[None, :]
+        x_positions = torch.argmax((input_ids == X_TOKEN_ID).long(), dim=1)
+        t_positions = torch.argmax((input_ids == T_TOKEN_ID).long(), dim=1)
+        x_mask = (
+            (input_ids >= DIGIT_OFFSET)
+            & attention_mask
+            & (positions > x_positions[:, None])
+            & (positions < t_positions[:, None])
+        )
+        significance = (
+            torch.flip(
+                torch.cumsum(torch.flip(x_mask.long(), dims=(1,)), dim=1),
+                dims=(1,),
+            )
+            - 1
+        ).clamp(min=0, max=MAX_OUTPUT_DIGITS - 1)
+        digit_logits = self.answer_decoder(initial_state).view(
+            input_ids.shape[0],
+            MAX_OUTPUT_DIGITS,
+            self.config.vocab_size,
+        )
+        batch_indices = torch.arange(
+            input_ids.shape[0],
+            device=input_ids.device,
+        )[:, None]
+        reconstruction_logits = digit_logits[batch_indices, significance]
+        return F.cross_entropy(
+            reconstruction_logits[x_mask].float(),
+            input_ids[x_mask],
+        )
 
     @staticmethod
     def _parse_fields(
@@ -198,11 +262,11 @@ class JointAnswerModel(nn.Module):
                 time_steps * 10 + digit,
                 time_steps,
             )
-        return modulus, residue, time_steps
+        return modulus, residue, time_steps.clamp(min=1, max=MAX_EVAL_T)
 
 
-def build_model(spec: ModelSpec) -> JointAnswerModel:
-    model = JointAnswerModel(spec)
+def build_model(spec: ModelSpec) -> CanonicalResidueModel:
+    model = CanonicalResidueModel(spec)
     assert_model_state(model, spec)
     return model
 
@@ -215,7 +279,7 @@ def build_optimizer(
         model.parameters(),
         lr=1e-3,
         betas=(0.9, 0.95),
-        weight_decay=0.01,
+        weight_decay=0.02,
         capturable=spec.device_type == "cuda",
     )
 
@@ -236,9 +300,25 @@ def build_optimizer(
     return OptimizerBundle(optimizer, scheduler)
 
 
+def training_loss(logits: Tensor, labels: Tensor, auxiliary: object) -> Tensor:
+    if not isinstance(auxiliary, tuple) or len(auxiliary) != 2:
+        raise TypeError("auxiliary output must contain reconstruction and entropy")
+    reconstruction_loss, code_entropy = auxiliary
+    if not isinstance(reconstruction_loss, Tensor) or reconstruction_loss.ndim != 0:
+        raise TypeError("reconstruction loss must be a scalar tensor")
+    if not isinstance(code_entropy, Tensor) or code_entropy.ndim != 0:
+        raise TypeError("code entropy must be a scalar tensor")
+    return (
+        F.cross_entropy(logits, labels)
+        + RECONSTRUCTION_WEIGHT * reconstruction_loss
+        + ENTROPY_WEIGHT * code_entropy
+    )
+
+
 SUBMISSION = Submission(
     build_model=build_model,
     build_optimizer=build_optimizer,
+    training_loss=training_loss,
     batch_size=TRAIN_BATCH_SIZE,
     eval_batch_size=512,
     max_steps=MAX_TRAINING_STEPS,
