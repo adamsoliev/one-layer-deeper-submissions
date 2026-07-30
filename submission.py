@@ -1,4 +1,4 @@
-"""Associative-memory residue recurrence for One Layer Deeper."""
+"""Digit-compositional residue recurrence for One Layer Deeper."""
 
 from __future__ import annotations
 
@@ -19,6 +19,8 @@ WIDTH = 256
 TRANSITION_WIDTH = 1_024
 MAX_VALUE = 8_192
 RESIDUE_CODES = 2_048
+DIGIT_WIDTH = 64
+NUMERIC_DIGITS = 4
 PAIR_MEMORY_SIZE = 131_071
 PAIR_MEMORY_WIDTH = 64
 MEMORY_TOP_K = 8
@@ -50,6 +52,40 @@ class RMSNorm(nn.Module):
 
     def forward(self, hidden: Tensor) -> Tensor:
         return F.rms_norm(hidden, (hidden.shape[-1],), self.weight)
+
+
+class DecimalEncoder(nn.Module):
+    """Build a numeric code from shared digit and significance embeddings."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.digit_embedding = nn.Embedding(NUM_DIGITS, DIGIT_WIDTH)
+        self.significance_embedding = nn.Embedding(
+            NUMERIC_DIGITS,
+            DIGIT_WIDTH,
+        )
+        self.input_projection = nn.Linear(
+            NUMERIC_DIGITS * DIGIT_WIDTH,
+            WIDTH,
+        )
+        self.output_projection = nn.Linear(WIDTH, WIDTH)
+
+    def forward(self, value: Tensor) -> Tensor:
+        powers = torch.tensor(
+            (1, 10, 100, 1_000),
+            device=value.device,
+            dtype=value.dtype,
+        )
+        digits = (value[:, None] // powers[None, :]) % NUM_DIGITS
+        significance = torch.arange(
+            NUMERIC_DIGITS,
+            device=value.device,
+        )
+        embedded = self.digit_embedding(digits) + self.significance_embedding(
+            significance,
+        )[None, :, :]
+        hidden = F.silu(self.input_projection(embedded.flatten(start_dim=1)))
+        return self.output_projection(hidden)
 
 
 class SquaringTransition(nn.Module):
@@ -84,13 +120,13 @@ class SquaringTransition(nn.Module):
 
 
 class CanonicalResidueModel(nn.Module):
-    """Apply one memory-augmented squaring transition exactly T times."""
+    """Recur over canonical codes generated from shared decimal digits."""
 
     def __init__(self, spec: ModelSpec) -> None:
         super().__init__()
         self.config = Config(spec.vocab_size, spec.max_seq_len)
-        self.modulus_embedding = nn.Embedding(MAX_VALUE, WIDTH)
-        self.residue_embedding = nn.Embedding(MAX_VALUE, WIDTH)
+        self.decimal_encoder = DecimalEncoder()
+        self.modulus_projection = nn.Linear(WIDTH, WIDTH)
         self.pair_memory = nn.Embedding(
             PAIR_MEMORY_SIZE,
             PAIR_MEMORY_WIDTH,
@@ -136,10 +172,20 @@ class CanonicalResidueModel(nn.Module):
         modulus_index = modulus.clamp(max=MAX_VALUE - 1)
         residue_index = residue.clamp(max=MAX_VALUE - 1)
         modulus_vector = self.modulus_norm(
-            self.modulus_embedding(modulus_index),
+            self.modulus_projection(
+                self.decimal_encoder(modulus_index),
+            ),
         )
         initial_state = self.residue_norm(
-            self.residue_embedding(residue_index),
+            self.decimal_encoder(residue_index),
+        )
+        code_values = torch.arange(
+            RESIDUE_CODES,
+            device=input_ids.device,
+        )
+        residue_codes = F.normalize(
+            self.residue_norm(self.decimal_encoder(code_values)),
+            dim=-1,
         )
         reconstruction_loss = self._reconstruction_loss(
             initial_state,
@@ -167,7 +213,10 @@ class CanonicalResidueModel(nn.Module):
                 state_weights,
             )
             query = self.transition(state, modulus_vector, memory)
-            candidate, entropy, probabilities = self._canonicalize(query)
+            candidate, entropy, probabilities = self._canonicalize(
+                query,
+                residue_codes,
+            )
             candidate_weights, candidate_indices = probabilities.topk(
                 MEMORY_TOP_K,
                 dim=-1,
@@ -215,14 +264,9 @@ class CanonicalResidueModel(nn.Module):
     def _canonicalize(
         self,
         query: Tensor,
+        codes: Tensor,
     ) -> tuple[Tensor, Tensor, Tensor]:
         query = F.normalize(self.query_norm(query), dim=-1)
-        codes = F.normalize(
-            self.residue_norm(
-                self.residue_embedding.weight[:RESIDUE_CODES],
-            ),
-            dim=-1,
-        )
         scale = self.code_log_scale.exp().clamp(max=30.0)
         probabilities = F.softmax(scale * (query @ codes.T), dim=-1)
         state = probabilities @ codes
