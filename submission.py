@@ -1,6 +1,8 @@
-"""Sparse 64-expert MoE for One Layer Deeper."""
+"""Multiplicative numeric recurrence for One Layer Deeper."""
 
 from __future__ import annotations
+
+import math
 
 import torch
 import torch.nn.functional as F
@@ -13,11 +15,22 @@ from benchmark import (
 )
 from torch import Tensor, nn
 
-NUM_EXPERTS = 64
-WIDTH = 98
-EXPERT_HIDDEN_WIDTH = 395
-MODEL_STATE_LIMIT = 5_000_000
-ROUTER_AUX_LOSS_WEIGHT = 0.01
+WIDTH = 192
+FOURIER_FEATURES = 64
+TRANSITION_WIDTH = 768
+DECODER_WIDTH = 768
+TRAIN_BATCH_SIZE = 512
+MAX_TRAINING_STEPS = 2_000
+WARMUP_STEPS = 50
+MAX_TRAIN_T = 3
+MAX_EVAL_T = 8
+PAD_TOKEN_ID = 0
+X_TOKEN_ID = 3
+T_TOKEN_ID = 4
+DIGIT_OFFSET = 7
+NUM_DIGITS = 10
+VALUE_SCALE = 2_048.0
+RECONSTRUCTION_WEIGHT = 0.25
 
 
 class Config:
@@ -26,30 +39,92 @@ class Config:
         self.max_seq_len = max_seq_len
 
 
-class Expert(nn.Module):
-    """Two-layer GELU feed-forward expert."""
+class RMSNorm(nn.Module):
+    def __init__(self, width: int) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(width))
+
+    def forward(self, hidden: Tensor) -> Tensor:
+        return F.rms_norm(hidden, (hidden.shape[-1],), self.weight)
+
+
+class ScalarEncoder(nn.Module):
+    """Embed one scalar with learned Fourier coordinates."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.up = nn.Linear(WIDTH, EXPERT_HIDDEN_WIDTH)
-        self.down = nn.Linear(EXPERT_HIDDEN_WIDTH, WIDTH)
+        self.frequency = nn.Parameter(torch.empty(FOURIER_FEATURES))
+        self.phase = nn.Parameter(torch.empty(FOURIER_FEATURES))
+        self.input = nn.Linear(2 * FOURIER_FEATURES + 2, WIDTH)
+        self.output = nn.Linear(WIDTH, WIDTH)
 
-    def forward(self, hidden: Tensor) -> Tensor:
-        return self.down(F.gelu(self.up(hidden), approximate="tanh"))
+    def reset_parameters(self) -> None:
+        nn.init.normal_(self.frequency, mean=0.0, std=6.0)
+        nn.init.uniform_(self.phase, -math.pi, math.pi)
+        nn.init.normal_(self.input.weight, mean=0.0, std=0.02)
+        nn.init.zeros_(self.input.bias)
+        nn.init.normal_(self.output.weight, mean=0.0, std=0.02)
+        nn.init.zeros_(self.output.bias)
+
+    def forward(self, value: Tensor, raw_value: Tensor) -> Tensor:
+        angles = value[:, None] * self.frequency[None, :] + self.phase[None, :]
+        features = torch.cat(
+            (
+                value[:, None],
+                torch.log1p(raw_value)[:, None] / 8.0,
+                torch.sin(angles),
+                torch.cos(angles),
+            ),
+            dim=-1,
+        )
+        return self.output(F.silu(self.input(features)))
 
 
-class SparseMoE(nn.Module):
-    """Route each embedded token through one of 64 feed-forward experts."""
+class MultiplicativeTransition(nn.Module):
+    """A tied gated update whose learned branches interact bilinearly."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.state_norm = RMSNorm(WIDTH)
+        self.context_norm = RMSNorm(WIDTH)
+        self.left = nn.Linear(2 * WIDTH, TRANSITION_WIDTH)
+        self.right = nn.Linear(2 * WIDTH, TRANSITION_WIDTH)
+        self.down = nn.Linear(TRANSITION_WIDTH, WIDTH)
+        self.gate = nn.Linear(2 * WIDTH, WIDTH)
+
+    def forward(self, state: Tensor, context: Tensor) -> Tensor:
+        joined = torch.cat(
+            (self.state_norm(state), self.context_norm(context)),
+            dim=-1,
+        )
+        product = F.silu(self.left(joined)) * self.right(joined)
+        update = self.down(product)
+        gate = torch.sigmoid(self.gate(joined))
+        return state + gate * update
+
+
+class NumericRecurrentModel(nn.Module):
+    """Parse decimal fields, then apply one learned transition exactly T times."""
 
     def __init__(self, spec: ModelSpec) -> None:
         super().__init__()
         self.config = Config(spec.vocab_size, spec.max_seq_len)
-        self.embedding = nn.Embedding(spec.vocab_size, WIDTH)
-        self.router = nn.Linear(WIDTH, NUM_EXPERTS)
-        self.experts = nn.ModuleList(Expert() for _ in range(NUM_EXPERTS))
-        self.output = nn.Linear(WIDTH, spec.vocab_size)
+        self.modulus_encoder = ScalarEncoder()
+        self.residue_encoder = ScalarEncoder()
+        self.context = nn.Linear(WIDTH, WIDTH)
+        self.transition = MultiplicativeTransition()
+        self.answer_embedding = nn.Embedding(spec.max_seq_len, WIDTH)
+        self.decoder_norm = RMSNorm(WIDTH)
+        self.decoder_up = nn.Linear(WIDTH, DECODER_WIDTH)
+        self.decoder_down = nn.Linear(DECODER_WIDTH, spec.vocab_size)
         self.apply(self._initialize)
-        self.output.weight = self.embedding.weight
+        self.modulus_encoder.reset_parameters()
+        self.residue_encoder.reset_parameters()
+
+        nn.init.normal_(self.transition.down.weight, mean=0.0, std=0.005)
+        nn.init.zeros_(self.transition.down.bias)
+        nn.init.zeros_(self.transition.gate.weight)
+        nn.init.constant_(self.transition.gate.bias, -1.0)
 
     @staticmethod
     def _initialize(module: nn.Module) -> None:
@@ -63,80 +138,134 @@ class SparseMoE(nn.Module):
         input_ids: Tensor,
         attention_mask: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
-        hidden = self.embedding(input_ids)
-        router_logits = self.router(hidden)
-        router_probabilities = F.softmax(router_logits.float(), dim=-1)
-        expert_ids = router_probabilities.argmax(dim=-1)
-        routing_weights = router_probabilities.gather(
-            dim=-1,
-            index=expert_ids.unsqueeze(-1),
-        ).squeeze(-1)
+        if attention_mask is None:
+            attention_mask = input_ids != PAD_TOKEN_ID
+        else:
+            attention_mask = attention_mask.to(dtype=torch.bool)
 
-        flat_hidden = hidden.reshape(-1, WIDTH)
-        flat_expert_ids = expert_ids.reshape(-1)
-        flat_routing_weights = routing_weights.reshape(-1).to(hidden.dtype)
-        flat_output = torch.zeros_like(flat_hidden)
-
-        for expert_id, expert in enumerate(self.experts):
-            token_indices = torch.nonzero(
-                flat_expert_ids == expert_id,
-                as_tuple=False,
-            ).squeeze(-1)
-            expert_input = flat_hidden.index_select(0, token_indices)
-            expert_output = expert(expert_input)
-            weighted_output = expert_output * flat_routing_weights.index_select(
-                0,
-                token_indices,
-            ).unsqueeze(-1)
-            flat_output.index_copy_(0, token_indices, weighted_output)
-
-        routed_hidden = flat_output.view_as(hidden)
-        logits = self.output(routed_hidden)
-        router_loss = self._router_load_balancing_loss(
-            router_probabilities,
-            expert_ids,
+        modulus, residue, time_steps = self._parse_fields(
+            input_ids,
             attention_mask,
         )
-        return logits, router_loss
+        modulus_vector = self.modulus_encoder(
+            modulus / VALUE_SCALE,
+            modulus,
+        )
+        residue_vector = self.residue_encoder(
+            residue / VALUE_SCALE,
+            residue,
+        )
+        context = self.context(modulus_vector)
+        reconstruction_loss = self._reconstruction_loss(
+            residue_vector,
+            input_ids,
+            attention_mask,
+        )
+        state = residue_vector
+
+        maximum_steps = MAX_TRAIN_T if self.training else MAX_EVAL_T
+        for step in range(maximum_steps):
+            candidate = self.transition(state, context)
+            active = (time_steps > step).unsqueeze(-1)
+            state = torch.where(active, candidate, state)
+
+        length = input_ids.shape[1]
+        positions = torch.arange(length, device=input_ids.device)[None, :]
+        valid_lengths = attention_mask.long().sum(dim=1, keepdim=True)
+        answer_slots = (valid_lengths - positions - 1).clamp(
+            min=0,
+            max=self.answer_embedding.num_embeddings - 1,
+        )
+        logits = self._decode(state, answer_slots)
+        return logits, reconstruction_loss
+
+    def _decode(self, state: Tensor, answer_slots: Tensor) -> Tensor:
+        decoded = state[:, None, :] + self.answer_embedding(answer_slots)
+        return self.decoder_down(F.silu(self.decoder_up(self.decoder_norm(decoded))))
+
+    def _reconstruction_loss(
+        self,
+        residue_vector: Tensor,
+        input_ids: Tensor,
+        attention_mask: Tensor,
+    ) -> Tensor:
+        length = input_ids.shape[1]
+        positions = torch.arange(length, device=input_ids.device)[None, :]
+        x_positions = torch.argmax((input_ids == X_TOKEN_ID).long(), dim=1)
+        t_positions = torch.argmax((input_ids == T_TOKEN_ID).long(), dim=1)
+        x_mask = (
+            (input_ids >= DIGIT_OFFSET)
+            & attention_mask
+            & (positions > x_positions[:, None])
+            & (positions < t_positions[:, None])
+        )
+        significance = (
+            torch.flip(
+                torch.cumsum(torch.flip(x_mask.long(), dims=(1,)), dim=1),
+                dims=(1,),
+            )
+            - 1
+        )
+        reconstruction_logits = self._decode(
+            residue_vector,
+            significance.clamp_min(0),
+        )
+        return F.cross_entropy(
+            reconstruction_logits[x_mask].float(),
+            input_ids[x_mask],
+        )
 
     @staticmethod
-    def _router_load_balancing_loss(
-        probabilities: Tensor,
-        expert_ids: Tensor,
-        attention_mask: Tensor | None,
-    ) -> Tensor:
-        assignments = F.one_hot(
-            expert_ids,
-            num_classes=NUM_EXPERTS,
-        ).to(probabilities.dtype)
-
-        if attention_mask is None:
-            token_weights = probabilities.new_ones(expert_ids.shape)
-        else:
-            if attention_mask.shape != expert_ids.shape:
-                raise ValueError("attention_mask must match input_ids")
-            token_weights = attention_mask.to(
-                device=probabilities.device,
-                dtype=probabilities.dtype,
-            )
-
-        normalizer = token_weights.sum().clamp(min=1)
-        token_weights = token_weights.unsqueeze(-1)
-        expert_fraction = (assignments * token_weights).sum(dim=(0, 1))
-        expert_fraction = expert_fraction / normalizer
-        probability_fraction = (probabilities * token_weights).sum(dim=(0, 1))
-        probability_fraction = probability_fraction / normalizer
-        return NUM_EXPERTS * torch.sum(expert_fraction * probability_fraction)
-
-
-def build_model(spec: ModelSpec) -> SparseMoE:
-    model = SparseMoE(spec)
-    model_state = sum(parameter.numel() for parameter in model.parameters())
-    model_state += sum(buffer.numel() for buffer in model.buffers())
-    if model_state > MODEL_STATE_LIMIT:
-        raise ValueError(
-            f"model state {model_state:,} exceeds {MODEL_STATE_LIMIT:,}"
+    def _parse_fields(
+        input_ids: Tensor,
+        attention_mask: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        modulus = torch.zeros(
+            input_ids.shape[0],
+            device=input_ids.device,
+            dtype=torch.float32,
         )
+        residue = torch.zeros_like(modulus)
+        time_steps = torch.zeros(
+            input_ids.shape[0],
+            device=input_ids.device,
+            dtype=torch.long,
+        )
+        field = torch.zeros_like(time_steps)
+        for position in range(input_ids.shape[1]):
+            token = input_ids[:, position]
+            field = torch.where(token == X_TOKEN_ID, 1, field)
+            field = torch.where(token == T_TOKEN_ID, 2, field)
+            is_digit = (token >= DIGIT_OFFSET) & attention_mask[:, position]
+            digit_long = (token - DIGIT_OFFSET).clamp(
+                min=0,
+                max=NUM_DIGITS - 1,
+            )
+            digit = digit_long.to(dtype=modulus.dtype)
+            modulus = torch.where(
+                is_digit & (field == 0),
+                modulus * 10.0 + digit,
+                modulus,
+            )
+            residue = torch.where(
+                is_digit & (field == 1),
+                residue * 10.0 + digit,
+                residue,
+            )
+            time_steps = torch.where(
+                is_digit & (field == 2),
+                time_steps * 10 + digit_long,
+                time_steps,
+            )
+        return (
+            modulus,
+            residue,
+            time_steps.clamp(min=1, max=MAX_EVAL_T),
+        )
+
+
+def build_model(spec: ModelSpec) -> NumericRecurrentModel:
+    model = NumericRecurrentModel(spec)
     assert_model_state(model, spec)
     return model
 
@@ -148,21 +277,39 @@ def build_optimizer(
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=1e-3,
-        betas=(0.9, 0.999),
-        weight_decay=0.01,
+        betas=(0.9, 0.95),
+        weight_decay=0.05,
         capturable=spec.device_type == "cuda",
     )
-    return OptimizerBundle(optimizer)
+
+    def learning_rate_multiplier(step: int) -> float:
+        if step < WARMUP_STEPS:
+            return (step + 1) / WARMUP_STEPS
+        progress = min(
+            (step - WARMUP_STEPS) / (MAX_TRAINING_STEPS - WARMUP_STEPS),
+            1.0,
+        )
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return 0.1 + 0.9 * cosine
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer,
+        learning_rate_multiplier,
+    )
+    return OptimizerBundle(optimizer, scheduler)
 
 
 def training_loss(logits: Tensor, labels: Tensor, auxiliary: object) -> Tensor:
     if not isinstance(auxiliary, Tensor) or auxiliary.ndim != 0:
-        raise TypeError("router loss must be a scalar tensor")
-    return F.cross_entropy(logits, labels) + ROUTER_AUX_LOSS_WEIGHT * auxiliary
+        raise TypeError("reconstruction loss must be a scalar tensor")
+    return F.cross_entropy(logits, labels) + RECONSTRUCTION_WEIGHT * auxiliary
 
 
 SUBMISSION = Submission(
     build_model=build_model,
     build_optimizer=build_optimizer,
     training_loss=training_loss,
+    batch_size=TRAIN_BATCH_SIZE,
+    eval_batch_size=512,
+    max_steps=MAX_TRAINING_STEPS,
 )
