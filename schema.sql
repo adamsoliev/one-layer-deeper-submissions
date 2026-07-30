@@ -23,7 +23,8 @@ INSERT INTO architectures VALUES
     ('joint-answer-bottleneck', 'Shallow joint-answer bottleneck', 'a644db33cbf7157343bac299437a5e19dcea997f', 15),
     ('canonical-residue', 'Canonical-state squaring recurrence', '88ca9897e9d7a0698a1dffc42c636fa7896d8f28', 16),
     ('associative-residue', 'Associative-memory residue recurrence', '6145506bcc830c906d11d0f4975988e98e4e399a', 17),
-    ('digit-compositional', 'Digit-compositional residue recurrence', 'd522f3dd6f2181a4545ec98464737ebfcbc016f2', 18)
+    ('digit-compositional', 'Digit-compositional residue recurrence', 'd522f3dd6f2181a4545ec98464737ebfcbc016f2', 18),
+    ('modulus-specialized', 'Modulus-specialized residue recurrence', 'dcb76db4c7a3fc2ab93da1b76e16fc349e8bb5cc', 19)
 ON CONFLICT (architecture_key) DO UPDATE SET
     architecture_label = excluded.architecture_label,
     source_commit = excluded.source_commit,
