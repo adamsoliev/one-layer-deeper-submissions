@@ -20,7 +20,8 @@ INSERT INTO architectures VALUES
     ('moe-64-50m', '64-expert width-312 MoE (50M)', '1eccfab7c309fc16c87c2ad381efc6407b84b809', 12),
     ('moe-64-5m-tied', '64-expert width-98 tied MoE (5M)', '73e3eb5e57fe667ad3bfd141a1aa4e5145df1f5c', 13),
     ('numeric-multiplicative', 'Multiplicative numeric recurrence', '394f4fc429b06488a75422c474aeb63e5c512aec', 14),
-    ('joint-answer-bottleneck', 'Shallow joint-answer bottleneck', 'a644db33cbf7157343bac299437a5e19dcea997f', 15)
+    ('joint-answer-bottleneck', 'Shallow joint-answer bottleneck', 'a644db33cbf7157343bac299437a5e19dcea997f', 15),
+    ('canonical-residue', 'Canonical-state squaring recurrence', '88ca9897e9d7a0698a1dffc42c636fa7896d8f28', 16)
 ON CONFLICT (architecture_key) DO UPDATE SET
     architecture_label = excluded.architecture_label,
     source_commit = excluded.source_commit,
