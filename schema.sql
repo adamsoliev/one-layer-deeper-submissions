@@ -28,7 +28,8 @@ INSERT INTO architectures VALUES
     ('hybrid-numeric', 'Hybrid numeric residue recurrence', '2391edd434256912bfd48f249a0f9ddaacf34602', 20),
     ('residual-memory', 'Residual-memory residue recurrence', '5d84386a473173459e2412b5e1915835af421ef2', 21),
     ('modulus-masked', 'Modulus-masked residue recurrence', '25744ff5a5c41416dc6012ef678756730d2ae617', 22),
-    ('stochastic-memory', 'Stochastic-memory residue recurrence', 'f4d84f52f800123a14237646db619e7b6fffc3bc', 23)
+    ('stochastic-memory', 'Stochastic-memory residue recurrence', 'f4d84f52f800123a14237646db619e7b6fffc3bc', 23),
+    ('reflection-invariant', 'Reflection-invariant residue recurrence', '2cd612c3916df3dcaf2d2ee703f1558e14508377', 24)
 ON CONFLICT (architecture_key) DO UPDATE SET
     architecture_label = excluded.architecture_label,
     source_commit = excluded.source_commit,
