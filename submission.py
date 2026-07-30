@@ -1,4 +1,4 @@
-"""Residual-memory residue recurrence for One Layer Deeper."""
+"""Modulus-masked residue recurrence for One Layer Deeper."""
 
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ class RMSNorm(nn.Module):
 
 
 class SquaringTransition(nn.Module):
-    """Combine shared computation with a direct learned transition memory."""
+    """Produce a codebook query from residue, modulus, and learned memory."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -80,11 +80,11 @@ class SquaringTransition(nn.Module):
         )
         features = self.feature_norm(features)
         hidden = F.silu(self.left(features)) * self.right(features)
-        return self.query(hidden) + memory
+        return self.query(hidden)
 
 
 class CanonicalResidueModel(nn.Module):
-    """Apply one residual-memory squaring transition exactly T times."""
+    """Recur only through canonical residue codes that are valid for N."""
 
     def __init__(self, spec: ModelSpec) -> None:
         super().__init__()
@@ -167,7 +167,10 @@ class CanonicalResidueModel(nn.Module):
                 state_weights,
             )
             query = self.transition(state, modulus_vector, memory)
-            candidate, entropy, probabilities = self._canonicalize(query)
+            candidate, entropy, probabilities = self._canonicalize(
+                query,
+                modulus_index,
+            )
             candidate_weights, candidate_indices = probabilities.topk(
                 MEMORY_TOP_K,
                 dim=-1,
@@ -215,6 +218,7 @@ class CanonicalResidueModel(nn.Module):
     def _canonicalize(
         self,
         query: Tensor,
+        modulus: Tensor,
     ) -> tuple[Tensor, Tensor, Tensor]:
         query = F.normalize(self.query_norm(query), dim=-1)
         codes = F.normalize(
@@ -224,7 +228,17 @@ class CanonicalResidueModel(nn.Module):
             dim=-1,
         )
         scale = self.code_log_scale.exp().clamp(max=30.0)
-        probabilities = F.softmax(scale * (query @ codes.T), dim=-1)
+        similarities = scale * (query @ codes.T)
+        code_values = torch.arange(
+            RESIDUE_CODES,
+            device=query.device,
+        )
+        valid_codes = code_values[None, :] < modulus.clamp_min(1)[:, None]
+        similarities = similarities.masked_fill(
+            ~valid_codes,
+            torch.finfo(similarities.dtype).min,
+        )
+        probabilities = F.softmax(similarities, dim=-1)
         state = probabilities @ codes
         entropy = -(probabilities * probabilities.clamp_min(1e-8).log()).sum(
             dim=-1,
