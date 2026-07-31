@@ -1,4 +1,4 @@
-"""Multiperiod orbit-memory recurrence for One Layer Deeper."""
+"""Latent quotient-automata recurrence for One Layer Deeper."""
 
 from __future__ import annotations
 
@@ -21,12 +21,12 @@ MAX_VALUE = 8_192
 RESIDUE_CODES = 2_048
 PAIR_MEMORY_SIZE = 131_071
 PAIR_MEMORY_WIDTH = 64
-ORBIT_MEMORY_SIZE = 262_139
-ORBIT_MEMORY_WIDTH = 32
-ORBIT_HEADS = 2
-MIN_CANDIDATE_PERIOD = 2
-MAX_CANDIDATE_PERIOD = 64
-NUM_CANDIDATE_PERIODS = MAX_CANDIDATE_PERIOD - MIN_CANDIDATE_PERIOD + 1
+QUOTIENT_HEADS = 2
+MIN_QUOTIENT_PERIOD = 2
+MAX_QUOTIENT_PERIOD = 64
+NUM_QUOTIENT_PERIODS = MAX_QUOTIENT_PERIOD - MIN_QUOTIENT_PERIOD + 1
+QUOTIENT_STATE_SIZE = MAX_QUOTIENT_PERIOD
+PERIOD_EMBEDDING_WIDTH = 32
 MEMORY_TOP_K = 8
 MAX_OUTPUT_DIGITS = 4
 TRAIN_BATCH_SIZE = 512
@@ -73,7 +73,7 @@ class SquaringTransition(nn.Module):
         state: Tensor,
         modulus: Tensor,
         memory: Tensor,
-        orbit_memory: Tensor,
+        quotient: Tensor,
     ) -> Tensor:
         features = torch.cat(
             (
@@ -82,7 +82,7 @@ class SquaringTransition(nn.Module):
                 state * modulus,
                 state - modulus,
                 memory,
-                orbit_memory,
+                quotient,
             ),
             dim=-1,
         )
@@ -92,7 +92,7 @@ class SquaringTransition(nn.Module):
 
 
 class CanonicalResidueModel(nn.Module):
-    """Attend to candidate quotient memories for the hidden root orbit."""
+    """Run learned quotient automata beside the global residue recurrence."""
 
     def __init__(self, spec: ModelSpec) -> None:
         super().__init__()
@@ -103,26 +103,35 @@ class CanonicalResidueModel(nn.Module):
             PAIR_MEMORY_SIZE,
             PAIR_MEMORY_WIDTH,
         )
-        self.orbit_selector = nn.Embedding(
+        self.quotient_selector = nn.Embedding(
             MAX_VALUE,
-            ORBIT_HEADS * NUM_CANDIDATE_PERIODS,
+            QUOTIENT_HEADS * NUM_QUOTIENT_PERIODS,
         )
-        self.orbit_memory = nn.Embedding(
-            ORBIT_MEMORY_SIZE,
-            ORBIT_MEMORY_WIDTH,
+        self.period_embedding = nn.Embedding(
+            NUM_QUOTIENT_PERIODS,
+            PERIOD_EMBEDDING_WIDTH,
+        )
+        self.quotient_transition_logits = nn.Parameter(
+            torch.empty(
+                NUM_QUOTIENT_PERIODS,
+                QUOTIENT_STATE_SIZE,
+                QUOTIENT_STATE_SIZE,
+            ),
         )
         self.memory_projection = nn.Linear(
             PAIR_MEMORY_WIDTH,
             WIDTH,
             bias=False,
         )
-        self.orbit_memory_projection = nn.Linear(
-            ORBIT_HEADS * ORBIT_MEMORY_WIDTH,
-            WIDTH,
-            bias=False,
+        quotient_features = (
+            QUOTIENT_HEADS * QUOTIENT_STATE_SIZE
+            + QUOTIENT_HEADS * PERIOD_EMBEDDING_WIDTH
+            + QUOTIENT_STATE_SIZE * QUOTIENT_STATE_SIZE
         )
+        self.quotient_projection = nn.Linear(quotient_features, WIDTH)
         self.modulus_norm = RMSNorm(WIDTH)
         self.residue_norm = RMSNorm(WIDTH)
+        self.quotient_norm = RMSNorm(WIDTH)
         self.query_norm = RMSNorm(WIDTH)
         self.transition = SquaringTransition()
         self.code_log_scale = nn.Parameter(torch.tensor(math.log(10.0)))
@@ -132,6 +141,12 @@ class CanonicalResidueModel(nn.Module):
         )
         self.apply(self._initialize)
         nn.init.normal_(self.transition.query.weight, mean=0.0, std=0.01)
+        nn.init.normal_(self.quotient_transition_logits, mean=0.0, std=0.02)
+        with torch.no_grad():
+            self.quotient_transition_logits.diagonal(
+                dim1=-2,
+                dim2=-1,
+            ).add_(2.0)
 
     @staticmethod
     def _initialize(module: nn.Module) -> None:
@@ -169,6 +184,14 @@ class CanonicalResidueModel(nn.Module):
         )
 
         state = initial_state
+        quotient_state = self._initialize_quotient_state(
+            modulus_index,
+            residue,
+        )
+        quotient_context = self._quotient_context(
+            modulus_index,
+            quotient_state,
+        )
         state_indices = residue.clamp(max=RESIDUE_CODES - 1)[:, None].expand(
             -1,
             MEMORY_TOP_K,
@@ -182,6 +205,17 @@ class CanonicalResidueModel(nn.Module):
         active_steps = state.new_zeros(state.shape[0])
         maximum_steps = MAX_TRAIN_T if self.training else MAX_EVAL_T
         for step in range(maximum_steps):
+            active = time_steps > step
+            quotient_candidate = self._advance_quotient(quotient_state)
+            quotient_state = torch.where(
+                active[:, None, None],
+                quotient_candidate,
+                quotient_state,
+            )
+            quotient_context = self._quotient_context(
+                modulus_index,
+                quotient_state,
+            )
             transition_state = self._symmetric_state(
                 state,
                 modulus_index,
@@ -193,16 +227,11 @@ class CanonicalResidueModel(nn.Module):
                 state_indices,
                 state_weights,
             )
-            orbit_memory = self._orbit_memory_context(
-                modulus_index,
-                state_indices,
-                state_weights,
-            )
             query = self.transition(
                 transition_state,
                 modulus_vector,
                 memory,
-                orbit_memory,
+                quotient_context,
             )
             candidate, entropy, probabilities = self._canonicalize(query)
             candidate_weights, candidate_indices = probabilities.topk(
@@ -213,7 +242,6 @@ class CanonicalResidueModel(nn.Module):
                 dim=-1,
                 keepdim=True,
             )
-            active = time_steps > step
             state = torch.where(active[:, None], candidate, state)
             state_indices = torch.where(
                 active[:, None],
@@ -231,7 +259,12 @@ class CanonicalResidueModel(nn.Module):
         code_entropy = (
             entropy_sum / active_steps.clamp_min(1.0)
         ).mean() / math.log(RESIDUE_CODES)
-        logits = self._decode_sequence(state, input_ids, attention_mask)
+        decoded_state = self.residue_norm(state + quotient_context)
+        logits = self._decode_sequence(
+            decoded_state,
+            input_ids,
+            attention_mask,
+        )
         return logits, (reconstruction_loss, code_entropy)
 
     def _memory_context(
@@ -253,57 +286,74 @@ class CanonicalResidueModel(nn.Module):
         ).sum(dim=1)
         return self.memory_projection(memory)
 
-    def _orbit_memory_context(
+    def _initialize_quotient_state(
         self,
         modulus: Tensor,
-        residue_indices: Tensor,
-        residue_weights: Tensor,
+        residue: Tensor,
     ) -> Tensor:
-        integer_modulus = modulus.clamp_min(1)[:, None]
-        residues = residue_indices % integer_modulus
+        integer_modulus = modulus.clamp_min(1)
+        residues = residue % integer_modulus
         reflected = (integer_modulus - residues) % integer_modulus
         representatives = torch.minimum(residues, reflected)
         periods = torch.arange(
-            MIN_CANDIDATE_PERIOD,
-            MAX_CANDIDATE_PERIOD + 1,
-            device=residue_indices.device,
+            MIN_QUOTIENT_PERIOD,
+            MAX_QUOTIENT_PERIOD + 1,
+            device=residue.device,
         )
-        period_residues = representatives[..., None] % periods
+        period_residues = representatives[:, None] % periods
         period_reflections = (periods - period_residues) % periods
-        folded_residues = torch.minimum(
-            period_residues,
-            period_reflections,
-        )
+        folded = torch.minimum(period_residues, period_reflections)
+        return F.one_hot(
+            folded,
+            num_classes=QUOTIENT_STATE_SIZE,
+        ).to(self.residue_embedding.weight.dtype)
 
-        base_keys = (
-            (modulus[:, None, None] * (MAX_CANDIDATE_PERIOD + 1)
-             + periods[None, None, :])
-            * (MAX_CANDIDATE_PERIOD + 1)
-            + folded_residues
+    def _advance_quotient(self, state: Tensor) -> Tensor:
+        periods = torch.arange(
+            MIN_QUOTIENT_PERIOD,
+            MAX_QUOTIENT_PERIOD + 1,
+            device=state.device,
         )
-        head_offsets = torch.arange(
-            ORBIT_HEADS,
-            device=residue_indices.device,
+        target_states = torch.arange(
+            QUOTIENT_STATE_SIZE,
+            device=state.device,
         )
-        keys = (
-            base_keys[:, :, None, :] * ORBIT_HEADS
-            + head_offsets[None, None, :, None]
-        ) % ORBIT_MEMORY_SIZE
-        memories = self.orbit_memory(keys)
+        valid_targets = target_states[None, None, :] < periods[:, None, None]
+        transition_logits = self.quotient_transition_logits.masked_fill(
+            ~valid_targets,
+            -10_000.0,
+        )
+        transitions = F.softmax(transition_logits, dim=-1)
+        return torch.einsum("bdj,djk->bdk", state, transitions)
+
+    def _quotient_context(
+        self,
+        modulus: Tensor,
+        state: Tensor,
+    ) -> Tensor:
         selector = F.softmax(
-            self.orbit_selector(modulus).view(
+            self.quotient_selector(modulus).view(
                 modulus.shape[0],
-                ORBIT_HEADS,
-                NUM_CANDIDATE_PERIODS,
+                QUOTIENT_HEADS,
+                NUM_QUOTIENT_PERIODS,
             ),
             dim=-1,
         )
-        weighted_memories = (
-            memories
-            * residue_weights.to(memories.dtype)[:, :, None, None, None]
-            * selector[:, None, :, :, None]
-        ).sum(dim=(1, 3))
-        return self.orbit_memory_projection(weighted_memories.flatten(1))
+        selected_states = torch.einsum("bdv,bhd->bhv", state, selector)
+        selected_periods = selector @ self.period_embedding.weight
+        joint_state = (
+            selected_states[:, 0, :, None]
+            * selected_states[:, 1, None, :]
+        )
+        features = torch.cat(
+            (
+                selected_states.flatten(1),
+                selected_periods.flatten(1),
+                joint_state.flatten(1),
+            ),
+            dim=-1,
+        )
+        return self.quotient_norm(self.quotient_projection(features))
 
     def _symmetric_state(
         self,
