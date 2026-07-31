@@ -1,4 +1,4 @@
-"""First-step dual-quotient orbit recurrence for One Layer Deeper."""
+"""Gated decimal-compositional recurrence for One Layer Deeper."""
 
 from __future__ import annotations
 
@@ -19,14 +19,10 @@ WIDTH = 256
 TRANSITION_WIDTH = 1_024
 MAX_VALUE = 8_192
 RESIDUE_CODES = 2_048
+DIGIT_WIDTH = 32
+NUMERIC_DIGITS = 4
 PAIR_MEMORY_SIZE = 131_071
 PAIR_MEMORY_WIDTH = 64
-ORBIT_MEMORY_SIZE = 262_139
-ORBIT_MEMORY_WIDTH = 32
-ORBIT_HEADS = 4
-MIN_CANDIDATE_PERIOD = 2
-MAX_CANDIDATE_PERIOD = 64
-NUM_CANDIDATE_PERIODS = MAX_CANDIDATE_PERIOD - MIN_CANDIDATE_PERIOD + 1
 MEMORY_TOP_K = 8
 MAX_OUTPUT_DIGITS = 4
 TRAIN_BATCH_SIZE = 512
@@ -60,14 +56,46 @@ class RMSNorm(nn.Module):
         return F.rms_norm(hidden, (hidden.shape[-1],), self.weight)
 
 
-class SquaringTransition(nn.Module):
-    """Use a quotient-orbit signal only when entering the recurrence."""
+class DecimalBranch(nn.Module):
+    """Compose values from shared digit and significance embeddings."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.feature_norm = RMSNorm(6 * WIDTH)
-        self.left = nn.Linear(6 * WIDTH, TRANSITION_WIDTH)
-        self.right = nn.Linear(6 * WIDTH, TRANSITION_WIDTH)
+        self.digit_embedding = nn.Embedding(NUM_DIGITS, DIGIT_WIDTH)
+        self.significance_embedding = nn.Embedding(
+            NUMERIC_DIGITS,
+            DIGIT_WIDTH,
+        )
+        self.projection = nn.Linear(
+            NUMERIC_DIGITS * DIGIT_WIDTH,
+            WIDTH,
+        )
+
+    def forward(self, value: Tensor) -> Tensor:
+        powers = torch.tensor(
+            (1, 10, 100, 1_000),
+            device=value.device,
+            dtype=value.dtype,
+        )
+        digits = (value[..., None] // powers) % NUM_DIGITS
+        significance = torch.arange(
+            NUMERIC_DIGITS,
+            device=value.device,
+        )
+        embedded = self.digit_embedding(digits) + self.significance_embedding(
+            significance,
+        )
+        return self.projection(embedded.flatten(start_dim=-2))
+
+
+class SquaringTransition(nn.Module):
+    """Produce a codebook query from residue, modulus, and learned memory."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.feature_norm = RMSNorm(5 * WIDTH)
+        self.left = nn.Linear(5 * WIDTH, TRANSITION_WIDTH)
+        self.right = nn.Linear(5 * WIDTH, TRANSITION_WIDTH)
         self.query = nn.Linear(TRANSITION_WIDTH, WIDTH)
 
     def forward(
@@ -75,7 +103,6 @@ class SquaringTransition(nn.Module):
         state: Tensor,
         modulus: Tensor,
         memory: Tensor,
-        orbit_memory: Tensor,
     ) -> Tensor:
         features = torch.cat(
             (
@@ -84,7 +111,6 @@ class SquaringTransition(nn.Module):
                 state * modulus,
                 state - modulus,
                 memory,
-                orbit_memory,
             ),
             dim=-1,
         )
@@ -94,32 +120,23 @@ class SquaringTransition(nn.Module):
 
 
 class CanonicalResidueModel(nn.Module):
-    """Canonicalize the input orbit, then preserve the baseline recurrence."""
+    """Adopt shared decimal structure only when supervised gradients favor it."""
 
     def __init__(self, spec: ModelSpec) -> None:
         super().__init__()
         self.config = Config(spec.vocab_size, spec.max_seq_len)
         self.modulus_embedding = nn.Embedding(MAX_VALUE, WIDTH)
         self.residue_embedding = nn.Embedding(MAX_VALUE, WIDTH)
+        self.decimal_branch = DecimalBranch()
+        self.modulus_decimal_projection = nn.Linear(WIDTH, WIDTH)
+        self.residue_numeric_gate = nn.Parameter(torch.zeros(()))
+        self.modulus_numeric_gate = nn.Parameter(torch.zeros(()))
         self.pair_memory = nn.Embedding(
             PAIR_MEMORY_SIZE,
             PAIR_MEMORY_WIDTH,
         )
-        self.orbit_selector = nn.Embedding(
-            MAX_VALUE,
-            ORBIT_HEADS * NUM_CANDIDATE_PERIODS,
-        )
-        self.orbit_memory = nn.Embedding(
-            ORBIT_MEMORY_SIZE,
-            ORBIT_MEMORY_WIDTH,
-        )
         self.memory_projection = nn.Linear(
             PAIR_MEMORY_WIDTH,
-            WIDTH,
-            bias=False,
-        )
-        self.orbit_memory_projection = nn.Linear(
-            ORBIT_HEADS * ORBIT_MEMORY_WIDTH,
             WIDTH,
             bias=False,
         )
@@ -159,11 +176,13 @@ class CanonicalResidueModel(nn.Module):
         modulus_index = modulus.clamp(max=MAX_VALUE - 1)
         residue_index = residue.clamp(max=MAX_VALUE - 1)
         modulus_vector = self.modulus_norm(
-            self.modulus_embedding(modulus_index),
+            self.modulus_embedding(modulus_index)
+            + torch.tanh(self.modulus_numeric_gate)
+            * self.modulus_decimal_projection(
+                self.decimal_branch(modulus_index),
+            ),
         )
-        initial_state = self.residue_norm(
-            self.residue_embedding(residue_index),
-        )
+        initial_state = self._residue_code(residue_index)
         reconstruction_loss = self._reconstruction_loss(
             initial_state,
             input_ids,
@@ -199,20 +218,10 @@ class CanonicalResidueModel(nn.Module):
                 state_indices,
                 state_weights,
             )
-            orbit_memory = (
-                self._orbit_memory_context(
-                    modulus_index,
-                    state_indices,
-                    state_weights,
-                )
-                if step == 0
-                else torch.zeros_like(modulus_vector)
-            )
             query = self.transition(
                 transition_state,
                 modulus_vector,
                 memory,
-                orbit_memory,
             )
             candidate, entropy, probabilities = self._canonicalize(query)
             candidate_weights, candidate_indices = probabilities.topk(
@@ -272,87 +281,6 @@ class CanonicalResidueModel(nn.Module):
         ).sum(dim=1)
         return self.memory_projection(memory)
 
-    def _orbit_memory_context(
-        self,
-        modulus: Tensor,
-        residue_indices: Tensor,
-        residue_weights: Tensor,
-    ) -> Tensor:
-        integer_modulus = modulus.clamp_min(1)[:, None, None]
-        representatives = residue_indices[:, :, None] % integer_modulus
-        reflected = (integer_modulus - representatives) % integer_modulus
-        representatives = torch.minimum(representatives, reflected)
-        periods = torch.arange(
-            MIN_CANDIDATE_PERIOD,
-            MAX_CANDIDATE_PERIOD + 1,
-            device=residue_indices.device,
-        )[None, None, :]
-        partners = torch.div(
-            integer_modulus + periods // 2,
-            periods,
-            rounding_mode="floor",
-        ).clamp_min(2)
-
-        period_residues = representatives % periods
-        period_folded = torch.minimum(
-            period_residues,
-            (periods - period_residues) % periods,
-        )
-        partner_residues = representatives % partners
-        partner_folded = torch.minimum(
-            partner_residues,
-            (partners - partner_residues) % partners,
-        )
-        period_indices = periods - MIN_CANDIDATE_PERIOD
-        keys = (
-            (
-                (
-                    modulus[:, None, None] * NUM_CANDIDATE_PERIODS
-                    + period_indices
-                )
-                * MAX_VALUE
-                + period_folded
-            )
-            * MAX_VALUE
-            + partner_folded
-        ) % ORBIT_MEMORY_SIZE
-        memories = self.orbit_memory(keys)
-        candidate_memories = (
-            memories
-            * residue_weights.to(memories.dtype)[:, :, None, None]
-        ).sum(dim=1)
-
-        selector = F.softmax(
-            self.orbit_selector(modulus).view(
-                modulus.shape[0],
-                ORBIT_HEADS,
-                NUM_CANDIDATE_PERIODS,
-            ),
-            dim=-1,
-        )
-        soft_context = torch.einsum(
-            "bhp,bpw->bhw",
-            selector,
-            candidate_memories,
-        )
-        selected_periods = selector.argmax(dim=-1)
-        hard_context = candidate_memories[:, None, :, :].expand(
-            -1,
-            ORBIT_HEADS,
-            -1,
-            -1,
-        ).gather(
-            2,
-            selected_periods[:, :, None, None].expand(
-                -1,
-                -1,
-                1,
-                ORBIT_MEMORY_WIDTH,
-            ),
-        ).squeeze(2)
-        orbit_context = soft_context + (hard_context - soft_context).detach()
-        return self.orbit_memory_projection(orbit_context.flatten(1))
-
     def _symmetric_state(
         self,
         state: Tensor,
@@ -365,9 +293,7 @@ class CanonicalResidueModel(nn.Module):
         reflected = ((modulus - residues) % modulus).clamp(
             max=MAX_VALUE - 1,
         )
-        reflected_codes = self.residue_norm(
-            self.residue_embedding(reflected),
-        )
+        reflected_codes = self._residue_code(reflected)
         reflected_state = (
             reflected_codes
             * residue_weights.to(reflected_codes.dtype)[..., None]
@@ -379,10 +305,12 @@ class CanonicalResidueModel(nn.Module):
         query: Tensor,
     ) -> tuple[Tensor, Tensor, Tensor]:
         query = F.normalize(self.query_norm(query), dim=-1)
+        code_values = torch.arange(
+            RESIDUE_CODES,
+            device=query.device,
+        )
         codes = F.normalize(
-            self.residue_norm(
-                self.residue_embedding.weight[:RESIDUE_CODES],
-            ),
+            self._residue_code(code_values),
             dim=-1,
         )
         scale = self.code_log_scale.exp().clamp(max=30.0)
@@ -392,6 +320,13 @@ class CanonicalResidueModel(nn.Module):
             dim=-1,
         )
         return self.residue_norm(state), entropy, probabilities
+
+    def _residue_code(self, value: Tensor) -> Tensor:
+        return self.residue_norm(
+            self.residue_embedding(value)
+            + torch.tanh(self.residue_numeric_gate)
+            * self.decimal_branch(value),
+        )
 
     def _decode_sequence(
         self,
