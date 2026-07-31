@@ -250,29 +250,13 @@ def score_cell(status: str | None, score_pct: float | None, view_url: str | None
     return score if view_url is None else f"[{score}]({view_url})"
 
 
-def refresh_readme() -> None:
-    with duckdb.connect(str(DATABASE_PATH), read_only=True) as connection:
-        rows = connection.execute(
-            """
-            SELECT
-                architecture_label,
-                source_commit,
-                e1_status,
-                e1_score_pct,
-                e1_view_url,
-                e5_status,
-                e5_score_pct,
-                e5_view_url
-            FROM architecture_results
-            ORDER BY display_order
-            """
-        ).fetchall()
-
+def results_table(rows: list[tuple]) -> list[str]:
     table = [
-        "| Architecture | Source | E1 | E5 |",
-        "| --- | --- | ---: | ---: |",
+        "| Attempt | Architecture | Source | E1 | E5 |",
+        "| ---: | --- | --- | ---: | ---: |",
     ]
     for (
+        attempt,
         architecture_label,
         source_commit,
         e1_status,
@@ -288,9 +272,50 @@ def refresh_readme() -> None:
         e1_score = score_cell(e1_status, e1_score_pct, e1_view_url)
         e5_score = score_cell(e5_status, e5_score_pct, e5_view_url)
         table.append(
-            f"| {markdown_escape(architecture_label)} | {commit} | "
+            f"| {attempt} | {markdown_escape(architecture_label)} | {commit} | "
             f"{e1_score} | {e5_score} |"
         )
+    return table
+
+
+def refresh_readme() -> None:
+    with duckdb.connect(str(DATABASE_PATH), read_only=True) as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                display_order,
+                architecture_label,
+                source_commit,
+                e1_status,
+                e1_score_pct,
+                e1_view_url,
+                e5_status,
+                e5_score_pct,
+                e5_view_url
+            FROM architecture_results
+            ORDER BY display_order
+            """
+        ).fetchall()
+
+    split_at = len(rows) // 2
+    earlier_rows = rows[:split_at]
+    recent_rows = rows[split_at:]
+    table: list[str] = []
+    if earlier_rows:
+        first_attempt = earlier_rows[0][0]
+        last_attempt = earlier_rows[-1][0]
+        table.extend(
+            [
+                "<details>",
+                f"<summary>Show earlier attempts ({first_attempt}–{last_attempt})</summary>",
+                "",
+                *results_table(earlier_rows),
+                "",
+                "</details>",
+                "",
+            ]
+        )
+    table.extend(results_table(recent_rows))
 
     readme = README_PATH.read_text(encoding="utf-8")
     before, separator, remainder = readme.partition(TABLE_START)
