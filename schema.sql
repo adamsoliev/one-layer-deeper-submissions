@@ -32,7 +32,8 @@ INSERT INTO architectures VALUES
     ('reflection-invariant', 'Reflection-invariant residue recurrence', '2cd612c3916df3dcaf2d2ee703f1558e14508377', 24),
     ('residue-anchored', 'Residue-anchored reflection recurrence', 'def8986c5cb7f4af046ce1d1e7e67091208c29ef', 25),
     ('semigroup-jump', 'Semigroup-jump residue recurrence', 'ce388f4ca0988894d5dfc4f15946a1dc6101b44f', 26),
-    ('periodic-factor', 'Periodic-factor residue recurrence', '8a640a007693e39e561a6877f67f9b2ab5ed0a5c', 27)
+    ('periodic-factor', 'Periodic-factor residue recurrence', '8a640a007693e39e561a6877f67f9b2ab5ed0a5c', 27),
+    ('multiperiod-orbit', 'Multiperiod orbit-memory recurrence', '783d539b309ff5eecab69cac2cc260ac677cad1d', 28)
 ON CONFLICT (architecture_key) DO UPDATE SET
     architecture_label = excluded.architecture_label,
     source_commit = excluded.source_commit,
