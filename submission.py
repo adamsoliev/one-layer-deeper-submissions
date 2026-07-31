@@ -1,4 +1,4 @@
-"""Periodic-factor residue recurrence for One Layer Deeper."""
+"""Multiperiod orbit-memory recurrence for One Layer Deeper."""
 
 from __future__ import annotations
 
@@ -21,8 +21,13 @@ MAX_VALUE = 8_192
 RESIDUE_CODES = 2_048
 PAIR_MEMORY_SIZE = 131_071
 PAIR_MEMORY_WIDTH = 64
+ORBIT_MEMORY_SIZE = 262_139
+ORBIT_MEMORY_WIDTH = 32
+ORBIT_HEADS = 2
+MIN_CANDIDATE_PERIOD = 2
+MAX_CANDIDATE_PERIOD = 64
+NUM_CANDIDATE_PERIODS = MAX_CANDIDATE_PERIOD - MIN_CANDIDATE_PERIOD + 1
 MEMORY_TOP_K = 8
-PERIOD_FREQUENCIES = 32
 MAX_OUTPUT_DIGITS = 4
 TRAIN_BATCH_SIZE = 512
 MAX_TRAINING_STEPS = 2_000
@@ -68,7 +73,7 @@ class SquaringTransition(nn.Module):
         state: Tensor,
         modulus: Tensor,
         memory: Tensor,
-        periodic: Tensor,
+        orbit_memory: Tensor,
     ) -> Tensor:
         features = torch.cat(
             (
@@ -77,7 +82,7 @@ class SquaringTransition(nn.Module):
                 state * modulus,
                 state - modulus,
                 memory,
-                periodic,
+                orbit_memory,
             ),
             dim=-1,
         )
@@ -87,30 +92,37 @@ class SquaringTransition(nn.Module):
 
 
 class CanonicalResidueModel(nn.Module):
-    """Learn complementary periods while preserving the r ↔ N-r symmetry."""
+    """Attend to candidate quotient memories for the hidden root orbit."""
 
     def __init__(self, spec: ModelSpec) -> None:
         super().__init__()
         self.config = Config(spec.vocab_size, spec.max_seq_len)
         self.modulus_embedding = nn.Embedding(MAX_VALUE, WIDTH)
         self.residue_embedding = nn.Embedding(MAX_VALUE, WIDTH)
-        self.period_selector = nn.Embedding(MAX_VALUE, 1)
         self.pair_memory = nn.Embedding(
             PAIR_MEMORY_SIZE,
             PAIR_MEMORY_WIDTH,
+        )
+        self.orbit_selector = nn.Embedding(
+            MAX_VALUE,
+            ORBIT_HEADS * NUM_CANDIDATE_PERIODS,
+        )
+        self.orbit_memory = nn.Embedding(
+            ORBIT_MEMORY_SIZE,
+            ORBIT_MEMORY_WIDTH,
         )
         self.memory_projection = nn.Linear(
             PAIR_MEMORY_WIDTH,
             WIDTH,
             bias=False,
         )
-        self.period_projection = nn.Linear(
-            2 * PERIOD_FREQUENCIES,
+        self.orbit_memory_projection = nn.Linear(
+            ORBIT_HEADS * ORBIT_MEMORY_WIDTH,
             WIDTH,
+            bias=False,
         )
         self.modulus_norm = RMSNorm(WIDTH)
         self.residue_norm = RMSNorm(WIDTH)
-        self.period_norm = RMSNorm(WIDTH)
         self.query_norm = RMSNorm(WIDTH)
         self.transition = SquaringTransition()
         self.code_log_scale = nn.Parameter(torch.tensor(math.log(10.0)))
@@ -181,7 +193,7 @@ class CanonicalResidueModel(nn.Module):
                 state_indices,
                 state_weights,
             )
-            periodic = self._periodic_context(
+            orbit_memory = self._orbit_memory_context(
                 modulus_index,
                 state_indices,
                 state_weights,
@@ -190,7 +202,7 @@ class CanonicalResidueModel(nn.Module):
                 transition_state,
                 modulus_vector,
                 memory,
-                periodic,
+                orbit_memory,
             )
             candidate, entropy, probabilities = self._canonicalize(query)
             candidate_weights, candidate_indices = probabilities.topk(
@@ -241,7 +253,7 @@ class CanonicalResidueModel(nn.Module):
         ).sum(dim=1)
         return self.memory_projection(memory)
 
-    def _periodic_context(
+    def _orbit_memory_context(
         self,
         modulus: Tensor,
         residue_indices: Tensor,
@@ -250,34 +262,48 @@ class CanonicalResidueModel(nn.Module):
         integer_modulus = modulus.clamp_min(1)[:, None]
         residues = residue_indices % integer_modulus
         reflected = (integer_modulus - residues) % integer_modulus
-        representatives = torch.minimum(residues, reflected).to(
-            self.period_selector.weight.dtype,
+        representatives = torch.minimum(residues, reflected)
+        periods = torch.arange(
+            MIN_CANDIDATE_PERIOD,
+            MAX_CANDIDATE_PERIOD + 1,
+            device=residue_indices.device,
+        )
+        period_residues = representatives[..., None] % periods
+        period_reflections = (periods - period_residues) % periods
+        folded_residues = torch.minimum(
+            period_residues,
+            period_reflections,
         )
 
-        continuous_modulus = modulus.to(representatives.dtype).clamp_min(4.0)
-        square_root = continuous_modulus.sqrt()
-        selector = torch.sigmoid(self.period_selector(modulus).squeeze(-1))
-        first_period = 2.0 + (square_root - 2.0) * selector
-        second_period = continuous_modulus / first_period
-        frequencies = torch.arange(
-            1,
-            PERIOD_FREQUENCIES + 1,
-            device=representatives.device,
-            dtype=representatives.dtype,
+        base_keys = (
+            (modulus[:, None, None] * (MAX_CANDIDATE_PERIOD + 1)
+             + periods[None, None, :])
+            * (MAX_CANDIDATE_PERIOD + 1)
+            + folded_residues
         )
-        angles = math.tau * representatives[..., None] * frequencies
-        periodic_features = torch.cat(
-            (
-                torch.cos(angles / first_period[:, None, None]),
-                torch.cos(angles / second_period[:, None, None]),
+        head_offsets = torch.arange(
+            ORBIT_HEADS,
+            device=residue_indices.device,
+        )
+        keys = (
+            base_keys[:, :, None, :] * ORBIT_HEADS
+            + head_offsets[None, None, :, None]
+        ) % ORBIT_MEMORY_SIZE
+        memories = self.orbit_memory(keys)
+        selector = F.softmax(
+            self.orbit_selector(modulus).view(
+                modulus.shape[0],
+                ORBIT_HEADS,
+                NUM_CANDIDATE_PERIODS,
             ),
             dim=-1,
         )
-        weighted_features = (
-            periodic_features
-            * residue_weights.to(periodic_features.dtype)[..., None]
-        ).sum(dim=1)
-        return self.period_norm(self.period_projection(weighted_features))
+        weighted_memories = (
+            memories
+            * residue_weights.to(memories.dtype)[:, :, None, None, None]
+            * selector[:, None, :, :, None]
+        ).sum(dim=(1, 3))
+        return self.orbit_memory_projection(weighted_memories.flatten(1))
 
     def _symmetric_state(
         self,
