@@ -36,7 +36,8 @@ INSERT INTO architectures VALUES
     ('multiperiod-orbit', 'Multiperiod orbit-memory recurrence', '783d539b309ff5eecab69cac2cc260ac677cad1d', 28),
     ('quotient-automata', 'Latent quotient-automata recurrence', '979c7397ddfa0688ff4cde3363fb7f3a3ecdeba6', 29),
     ('direct-transition', 'Direct transition-memory recurrence', '609e3fa7b0b75216f8a9b028c2bf78fa3659f1f9', 30),
-    ('joint-residue', 'Joint-residue supervised recurrence', '8efc43ca08c47a192227a6989e6da830a721cc63', 31)
+    ('joint-residue', 'Joint-residue supervised recurrence', '8efc43ca08c47a192227a6989e6da830a721cc63', 31),
+    ('semantic-decoder', 'Semantically decoded residue recurrence', 'd0e8d23e050660a20094ef9834f30bec6775f11a', 32)
 ON CONFLICT (architecture_key) DO UPDATE SET
     architecture_label = excluded.architecture_label,
     source_commit = excluded.source_commit,
