@@ -1,4 +1,4 @@
-"""Collision-supervised hard factor-memory recurrence."""
+"""First-step co-root fiber recurrence for One Layer Deeper."""
 
 from __future__ import annotations
 
@@ -91,7 +91,7 @@ class SquaringTransition(nn.Module):
 
 
 class CanonicalResidueModel(nn.Module):
-    """Canonicalize CRT co-roots through a collision-learned factor."""
+    """Pool a learned CRT co-root fiber before the first transition."""
 
     def __init__(self, spec: ModelSpec) -> None:
         super().__init__()
@@ -99,10 +99,6 @@ class CanonicalResidueModel(nn.Module):
         self.modulus_embedding = nn.Embedding(MAX_VALUE, WIDTH)
         self.residue_embedding = nn.Embedding(MAX_VALUE, WIDTH)
         self.pair_memory = nn.Embedding(
-            PAIR_MEMORY_SIZE,
-            PAIR_MEMORY_WIDTH,
-        )
-        self.factor_memory = nn.Embedding(
             PAIR_MEMORY_SIZE,
             PAIR_MEMORY_WIDTH,
         )
@@ -126,7 +122,6 @@ class CanonicalResidueModel(nn.Module):
         )
         self.apply(self._initialize)
         nn.init.normal_(self.transition.query.weight, mean=0.0, std=0.01)
-        nn.init.zeros_(self.factor_memory.weight)
         nn.init.zeros_(self.factor_selector.weight)
 
     @staticmethod
@@ -186,23 +181,27 @@ class CanonicalResidueModel(nn.Module):
         active_steps = state.new_zeros(state.shape[0])
         maximum_steps = MAX_TRAIN_T if self.training else MAX_EVAL_T
         for step in range(maximum_steps):
-            transition_state = self._symmetric_state(
-                state,
-                modulus_index,
-                state_indices,
-                state_weights,
+            transition_state = (
+                self._factor_fiber_state(
+                    modulus_index,
+                    state_indices,
+                    factor_probabilities,
+                )
+                if step == 0
+                else self._symmetric_state(
+                    state,
+                    modulus_index,
+                    state_indices,
+                    state_weights,
+                )
             )
             memory = self._memory_context(
                 modulus_index,
                 state_indices,
                 state_weights,
             )
-            memory = memory + self._factor_memory_context(
-                modulus_index,
-                state_indices,
-                state_weights,
-                factor_probabilities,
-            )
+            if step == 0:
+                memory = torch.zeros_like(memory)
             query = self.transition(
                 transition_state,
                 modulus_vector,
@@ -270,11 +269,10 @@ class CanonicalResidueModel(nn.Module):
         ).sum(dim=1)
         return self.memory_projection(memory)
 
-    def _factor_memory_context(
+    def _factor_fiber_state(
         self,
         modulus: Tensor,
         residue_indices: Tensor,
-        residue_weights: Tensor,
         factor_probabilities: Tensor,
     ) -> Tensor:
         integer_modulus = modulus.clamp_min(1)[:, None]
@@ -287,34 +285,49 @@ class CanonicalResidueModel(nn.Module):
             factors,
             rounding_mode="floor",
         ).clamp(min=2, max=MAX_VALUE - 1)
-        residues = residue_indices % integer_modulus
-        factor_residues = residues % factors
-        factor_coordinates = torch.minimum(
-            factor_residues,
-            (factors - factor_residues) % factors,
+        residues = residue_indices[:, :1] % integer_modulus
+        target_factor_residues = residues % factors
+        target_factor_coordinates = torch.minimum(
+            target_factor_residues,
+            (factors - target_factor_residues) % factors,
         )
-        partner_residues = residues % partners
-        partner_coordinates = torch.minimum(
-            partner_residues,
-            (partners - partner_residues) % partners,
+        target_partner_residues = residues % partners
+        target_partner_coordinates = torch.minimum(
+            target_partner_residues,
+            (partners - target_partner_residues) % partners,
         )
-        keys = (
-            (
-                (
-                    modulus[:, None] * (MAX_CANDIDATE_FACTOR + 1)
-                    + factors
-                )
-                * MAX_VALUE
-                + factor_coordinates
+
+        candidates = torch.arange(
+            RESIDUE_CODES,
+            device=modulus.device,
+        )[None, :]
+        candidate_factor_residues = candidates % factors
+        candidate_factor_coordinates = torch.minimum(
+            candidate_factor_residues,
+            (factors - candidate_factor_residues) % factors,
+        )
+        candidate_partner_residues = candidates % partners
+        candidate_partner_coordinates = torch.minimum(
+            candidate_partner_residues,
+            (partners - candidate_partner_residues) % partners,
+        )
+        same_fiber = (
+            (candidates < integer_modulus)
+            & (
+                candidate_factor_coordinates
+                == target_factor_coordinates
             )
-            * MAX_VALUE
-            + partner_coordinates
-        ) % PAIR_MEMORY_SIZE
-        memories = self.factor_memory(keys)
-        memory = (
-            memories * residue_weights.to(memories.dtype)[..., None]
-        ).sum(dim=1)
-        return self.memory_projection(memory)
+            & (
+                candidate_partner_coordinates
+                == target_partner_coordinates
+            )
+        )
+        weights = same_fiber.to(self.residue_embedding.weight.dtype)
+        weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1.0)
+        codes = self.residue_norm(
+            self.residue_embedding.weight[:RESIDUE_CODES],
+        )
+        return self.residue_norm(weights @ codes)
 
     def _symmetric_state(
         self,
