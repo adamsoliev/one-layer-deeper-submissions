@@ -1,4 +1,4 @@
-"""First-step co-root fiber recurrence for One Layer Deeper."""
+"""Factor-coordinate table recurrence for One Layer Deeper."""
 
 from __future__ import annotations
 
@@ -23,6 +23,8 @@ PAIR_MEMORY_SIZE = 131_071
 PAIR_MEMORY_WIDTH = 64
 MIN_CANDIDATE_FACTOR = 2
 MAX_CANDIDATE_FACTOR = 64
+COORDINATE_CLASSES = MAX_CANDIDATE_FACTOR
+FACTOR_SLOTS = MAX_CANDIDATE_FACTOR + 1
 NUM_CANDIDATE_FACTORS = (
     MAX_CANDIDATE_FACTOR - MIN_CANDIDATE_FACTOR + 1
 )
@@ -91,7 +93,7 @@ class SquaringTransition(nn.Module):
 
 
 class CanonicalResidueModel(nn.Module):
-    """Pool a learned CRT co-root fiber before the first transition."""
+    """Compose a co-root fiber with shared local transition tables."""
 
     def __init__(self, spec: ModelSpec) -> None:
         super().__init__()
@@ -115,6 +117,10 @@ class CanonicalResidueModel(nn.Module):
         self.residue_norm = RMSNorm(WIDTH)
         self.query_norm = RMSNorm(WIDTH)
         self.transition = SquaringTransition()
+        self.coordinate_transition = nn.Embedding(
+            FACTOR_SLOTS * COORDINATE_CLASSES,
+            COORDINATE_CLASSES,
+        )
         self.code_log_scale = nn.Parameter(torch.tensor(math.log(10.0)))
         self.answer_decoder = nn.Linear(
             WIDTH,
@@ -123,6 +129,7 @@ class CanonicalResidueModel(nn.Module):
         self.apply(self._initialize)
         nn.init.normal_(self.transition.query.weight, mean=0.0, std=0.01)
         nn.init.zeros_(self.factor_selector.weight)
+        nn.init.zeros_(self.coordinate_transition.weight)
 
     @staticmethod
     def _initialize(module: nn.Module) -> None:
@@ -207,7 +214,13 @@ class CanonicalResidueModel(nn.Module):
                 modulus_vector,
                 memory,
             )
-            candidate, entropy, probabilities = self._canonicalize(query)
+            candidate, entropy, probabilities = self._canonicalize(
+                query,
+                modulus_index,
+                state_indices,
+                state_weights,
+                factor_probabilities,
+            )
             candidate_weights, candidate_indices = probabilities.topk(
                 MEMORY_TOP_K,
                 dim=-1,
@@ -353,6 +366,10 @@ class CanonicalResidueModel(nn.Module):
     def _canonicalize(
         self,
         query: Tensor,
+        modulus: Tensor,
+        residue_indices: Tensor,
+        residue_weights: Tensor,
+        factor_probabilities: Tensor,
     ) -> tuple[Tensor, Tensor, Tensor]:
         query = F.normalize(self.query_norm(query), dim=-1)
         code_values = torch.arange(
@@ -366,7 +383,61 @@ class CanonicalResidueModel(nn.Module):
             dim=-1,
         )
         scale = self.code_log_scale.exp().clamp(max=30.0)
-        probabilities = F.softmax(scale * (query @ codes.T), dim=-1)
+        scores = scale * (query @ codes.T)
+
+        integer_modulus = modulus.clamp_min(1)[:, None]
+        factors = (
+            factor_probabilities.argmax(dim=-1)
+            + MIN_CANDIDATE_FACTOR
+        )[:, None]
+        partners = torch.div(
+            integer_modulus + factors // 2,
+            factors,
+            rounding_mode="floor",
+        ).clamp(min=2, max=MAX_VALUE - 1)
+        low_factors = torch.minimum(factors, partners)
+        high_factors = torch.maximum(factors, partners)
+        residues = residue_indices % integer_modulus
+        low_residues = residues % low_factors
+        low_input_coordinates = torch.minimum(
+            low_residues,
+            (low_factors - low_residues) % low_factors,
+        )
+        high_residues = residues % high_factors
+        high_input_coordinates = torch.minimum(
+            high_residues,
+            (high_factors - high_residues) % high_factors,
+        )
+        low_keys = (
+            low_factors.clamp(max=MAX_CANDIDATE_FACTOR)
+            * COORDINATE_CLASSES
+            + low_input_coordinates % COORDINATE_CLASSES
+        )
+        high_keys = (
+            high_factors.clamp(max=MAX_CANDIDATE_FACTOR)
+            * COORDINATE_CLASSES
+            + high_input_coordinates % COORDINATE_CLASSES
+        )
+        low_logits = (
+            self.coordinate_transition(low_keys)
+            * residue_weights[..., None].to(scores.dtype)
+        ).sum(dim=1)
+        high_logits = (
+            self.coordinate_transition(high_keys)
+            * residue_weights[..., None].to(scores.dtype)
+        ).sum(dim=1)
+        candidates = code_values[None, :]
+        low_output_coordinates = (
+            (candidates % low_factors) % COORDINATE_CLASSES
+        )
+        high_output_coordinates = (
+            (candidates % high_factors) % COORDINATE_CLASSES
+        )
+        coordinate_scores = (
+            low_logits.gather(1, low_output_coordinates)
+            + high_logits.gather(1, high_output_coordinates)
+        )
+        probabilities = F.softmax(scores + coordinate_scores, dim=-1)
         state = probabilities @ codes
         entropy = -(probabilities * probabilities.clamp_min(1e-8).log()).sum(
             dim=-1,
