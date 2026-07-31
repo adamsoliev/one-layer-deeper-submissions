@@ -1,4 +1,4 @@
-"""Direct transition-memory recurrence for One Layer Deeper."""
+"""Joint-residue supervised recurrence for One Layer Deeper."""
 
 from __future__ import annotations
 
@@ -21,7 +21,6 @@ MAX_VALUE = 8_192
 RESIDUE_CODES = 2_048
 PAIR_MEMORY_SIZE = 131_071
 PAIR_MEMORY_WIDTH = 64
-DIRECT_MEMORY_SIZE = PAIR_MEMORY_SIZE
 MEMORY_TOP_K = 8
 MAX_OUTPUT_DIGITS = 4
 TRAIN_BATCH_SIZE = 512
@@ -36,6 +35,8 @@ DIGIT_OFFSET = 7
 NUM_DIGITS = 10
 RECONSTRUCTION_WEIGHT = 0.25
 ENTROPY_WEIGHT = 0.05
+RESIDUE_SUPERVISION_WEIGHT = 1.0
+ROW_MARKER_BASE = -100.0
 
 
 class Config:
@@ -85,7 +86,7 @@ class SquaringTransition(nn.Module):
 
 
 class CanonicalResidueModel(nn.Module):
-    """Compose a direct reflection-keyed transition table exactly T times."""
+    """Anchor final latent codes to the provided joint numeric target."""
 
     def __init__(self, spec: ModelSpec) -> None:
         super().__init__()
@@ -95,10 +96,6 @@ class CanonicalResidueModel(nn.Module):
         self.pair_memory = nn.Embedding(
             PAIR_MEMORY_SIZE,
             PAIR_MEMORY_WIDTH,
-        )
-        self.direct_transition = nn.Embedding(
-            DIRECT_MEMORY_SIZE,
-            RESIDUE_CODES,
         )
         self.memory_projection = nn.Linear(
             PAIR_MEMORY_WIDTH,
@@ -116,7 +113,6 @@ class CanonicalResidueModel(nn.Module):
         )
         self.apply(self._initialize)
         nn.init.normal_(self.transition.query.weight, mean=0.0, std=0.01)
-        nn.init.zeros_(self.direct_transition.weight)
 
     @staticmethod
     def _initialize(module: nn.Module) -> None:
@@ -154,6 +150,10 @@ class CanonicalResidueModel(nn.Module):
         )
 
         state = initial_state
+        state_probabilities = F.one_hot(
+            residue.clamp(max=RESIDUE_CODES - 1),
+            num_classes=RESIDUE_CODES,
+        ).to(state.dtype)
         state_indices = residue.clamp(max=RESIDUE_CODES - 1)[:, None].expand(
             -1,
             MEMORY_TOP_K,
@@ -183,15 +183,7 @@ class CanonicalResidueModel(nn.Module):
                 modulus_vector,
                 memory,
             )
-            direct_logits = self._direct_transition_logits(
-                modulus_index,
-                state_indices,
-                state_weights,
-            )
-            candidate, entropy, probabilities = self._canonicalize(
-                query,
-                direct_logits,
-            )
+            candidate, entropy, probabilities = self._canonicalize(query)
             candidate_weights, candidate_indices = probabilities.topk(
                 MEMORY_TOP_K,
                 dim=-1,
@@ -202,6 +194,11 @@ class CanonicalResidueModel(nn.Module):
             )
             active = time_steps > step
             state = torch.where(active[:, None], candidate, state)
+            state_probabilities = torch.where(
+                active[:, None],
+                probabilities,
+                state_probabilities,
+            )
             state_indices = torch.where(
                 active[:, None],
                 candidate_indices,
@@ -219,7 +216,11 @@ class CanonicalResidueModel(nn.Module):
             entropy_sum / active_steps.clamp_min(1.0)
         ).mean() / math.log(RESIDUE_CODES)
         logits = self._decode_sequence(state, input_ids, attention_mask)
-        return logits, (reconstruction_loss, code_entropy)
+        return logits, (
+            reconstruction_loss,
+            code_entropy,
+            state_probabilities,
+        )
 
     def _memory_context(
         self,
@@ -239,24 +240,6 @@ class CanonicalResidueModel(nn.Module):
             memories * residue_weights.to(memories.dtype)[..., None]
         ).sum(dim=1)
         return self.memory_projection(memory)
-
-    def _direct_transition_logits(
-        self,
-        modulus: Tensor,
-        residue_indices: Tensor,
-        residue_weights: Tensor,
-    ) -> Tensor:
-        modulus = modulus.clamp_min(1)[:, None]
-        residues = residue_indices % modulus
-        reflected = (modulus - residues) % modulus
-        representatives = torch.minimum(residues, reflected)
-        keys = (
-            modulus * RESIDUE_CODES + representatives
-        ) % DIRECT_MEMORY_SIZE
-        logits = self.direct_transition(keys)
-        return (
-            logits * residue_weights.to(logits.dtype)[..., None]
-        ).sum(dim=1)
 
     def _symmetric_state(
         self,
@@ -282,7 +265,6 @@ class CanonicalResidueModel(nn.Module):
     def _canonicalize(
         self,
         query: Tensor,
-        direct_logits: Tensor,
     ) -> tuple[Tensor, Tensor, Tensor]:
         query = F.normalize(self.query_norm(query), dim=-1)
         codes = F.normalize(
@@ -292,10 +274,7 @@ class CanonicalResidueModel(nn.Module):
             dim=-1,
         )
         scale = self.code_log_scale.exp().clamp(max=30.0)
-        probabilities = F.softmax(
-            scale * (query @ codes.T) + direct_logits,
-            dim=-1,
-        )
+        probabilities = F.softmax(scale * (query @ codes.T), dim=-1)
         state = probabilities @ codes
         entropy = -(probabilities * probabilities.clamp_min(1e-8).log()).sum(
             dim=-1,
@@ -324,7 +303,17 @@ class CanonicalResidueModel(nn.Module):
             input_ids.shape[0],
             device=input_ids.device,
         )[:, None]
-        return digit_logits[batch_indices, answer_slots]
+        logits = digit_logits[batch_indices, answer_slots].clone()
+        row_markers = (
+            logits.new_tensor(ROW_MARKER_BASE)
+            - torch.arange(
+                input_ids.shape[0],
+                device=input_ids.device,
+                dtype=logits.dtype,
+            )
+        )
+        logits[:, :, PAD_TOKEN_ID] = row_markers[:, None]
+        return logits
 
     def _reconstruction_loss(
         self,
@@ -440,17 +429,62 @@ def build_optimizer(
 
 
 def training_loss(logits: Tensor, labels: Tensor, auxiliary: object) -> Tensor:
-    if not isinstance(auxiliary, tuple) or len(auxiliary) != 2:
-        raise TypeError("auxiliary output must contain reconstruction and entropy")
-    reconstruction_loss, code_entropy = auxiliary
+    if not isinstance(auxiliary, tuple) or len(auxiliary) != 3:
+        raise TypeError(
+            "auxiliary output must contain reconstruction, entropy, and residues",
+        )
+    reconstruction_loss, code_entropy, residue_probabilities = auxiliary
     if not isinstance(reconstruction_loss, Tensor) or reconstruction_loss.ndim != 0:
         raise TypeError("reconstruction loss must be a scalar tensor")
     if not isinstance(code_entropy, Tensor) or code_entropy.ndim != 0:
         raise TypeError("code entropy must be a scalar tensor")
+    if not isinstance(residue_probabilities, Tensor) or residue_probabilities.ndim != 2:
+        raise TypeError("residue probabilities must be a rank-2 tensor")
+
+    row_indices = (
+        ROW_MARKER_BASE - logits[:, PAD_TOKEN_ID]
+    ).round().to(torch.long)
+    batch_size = residue_probabilities.shape[0]
+    row_indices = row_indices.clamp(min=0, max=batch_size - 1)
+    digit_counts = torch.bincount(row_indices, minlength=batch_size)
+    row_starts = torch.cumsum(digit_counts, dim=0) - digit_counts
+    positions = (
+        torch.arange(labels.numel(), device=labels.device)
+        - row_starts[row_indices]
+    )
+    powers = digit_counts[row_indices] - positions - 1
+    place_values = torch.pow(
+        torch.full_like(powers, 10),
+        powers,
+    )
+    digit_values = (labels - DIGIT_OFFSET).clamp(
+        min=0,
+        max=NUM_DIGITS - 1,
+    )
+    target_residues = torch.zeros(
+        batch_size,
+        device=labels.device,
+        dtype=torch.long,
+    )
+    target_residues.scatter_add_(
+        0,
+        row_indices,
+        digit_values * place_values,
+    )
+    valid_rows = (digit_counts > 0) & (target_residues < RESIDUE_CODES)
+    residue_log_probabilities = residue_probabilities.float().clamp_min(1e-8).log()
+    supervised_log_probabilities = residue_log_probabilities[
+        torch.arange(batch_size, device=labels.device),
+        target_residues.clamp(max=RESIDUE_CODES - 1),
+    ]
+    residue_loss = -(
+        supervised_log_probabilities * valid_rows.to(supervised_log_probabilities.dtype)
+    ).sum() / valid_rows.sum().clamp_min(1)
     return (
         F.cross_entropy(logits, labels)
         + RECONSTRUCTION_WEIGHT * reconstruction_loss
         + ENTROPY_WEIGHT * code_entropy
+        + RESIDUE_SUPERVISION_WEIGHT * residue_loss
     )
 
 
