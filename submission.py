@@ -1,4 +1,4 @@
-"""Orbit-supervised residue recurrence for One Layer Deeper."""
+"""Straight-through semantic residue recurrence for One Layer Deeper."""
 
 from __future__ import annotations
 
@@ -21,12 +21,6 @@ MAX_VALUE = 8_192
 RESIDUE_CODES = 2_048
 PAIR_MEMORY_SIZE = 131_071
 PAIR_MEMORY_WIDTH = 64
-ORBIT_MEMORY_SIZE = 262_139
-ORBIT_MEMORY_WIDTH = 32
-ORBIT_HEADS = 2
-MIN_CANDIDATE_PERIOD = 2
-MAX_CANDIDATE_PERIOD = 64
-NUM_CANDIDATE_PERIODS = MAX_CANDIDATE_PERIOD - MIN_CANDIDATE_PERIOD + 1
 MEMORY_TOP_K = 8
 MAX_OUTPUT_DIGITS = 4
 TRAIN_BATCH_SIZE = 512
@@ -65,9 +59,9 @@ class SquaringTransition(nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.feature_norm = RMSNorm(6 * WIDTH)
-        self.left = nn.Linear(6 * WIDTH, TRANSITION_WIDTH)
-        self.right = nn.Linear(6 * WIDTH, TRANSITION_WIDTH)
+        self.feature_norm = RMSNorm(5 * WIDTH)
+        self.left = nn.Linear(5 * WIDTH, TRANSITION_WIDTH)
+        self.right = nn.Linear(5 * WIDTH, TRANSITION_WIDTH)
         self.query = nn.Linear(TRANSITION_WIDTH, WIDTH)
 
     def forward(
@@ -75,7 +69,6 @@ class SquaringTransition(nn.Module):
         state: Tensor,
         modulus: Tensor,
         memory: Tensor,
-        orbit_memory: Tensor,
     ) -> Tensor:
         features = torch.cat(
             (
@@ -84,7 +77,6 @@ class SquaringTransition(nn.Module):
                 state * modulus,
                 state - modulus,
                 memory,
-                orbit_memory,
             ),
             dim=-1,
         )
@@ -94,7 +86,7 @@ class SquaringTransition(nn.Module):
 
 
 class CanonicalResidueModel(nn.Module):
-    """Keep quotient-memory keys semantic through joint residue supervision."""
+    """Compose hard semantic residue codes with straight-through gradients."""
 
     def __init__(self, spec: ModelSpec) -> None:
         super().__init__()
@@ -105,21 +97,8 @@ class CanonicalResidueModel(nn.Module):
             PAIR_MEMORY_SIZE,
             PAIR_MEMORY_WIDTH,
         )
-        self.orbit_selector = nn.Embedding(
-            MAX_VALUE,
-            ORBIT_HEADS * NUM_CANDIDATE_PERIODS,
-        )
-        self.orbit_memory = nn.Embedding(
-            ORBIT_MEMORY_SIZE,
-            ORBIT_MEMORY_WIDTH,
-        )
         self.memory_projection = nn.Linear(
             PAIR_MEMORY_WIDTH,
-            WIDTH,
-            bias=False,
-        )
-        self.orbit_memory_projection = nn.Linear(
-            ORBIT_HEADS * ORBIT_MEMORY_WIDTH,
             WIDTH,
             bias=False,
         )
@@ -199,26 +178,22 @@ class CanonicalResidueModel(nn.Module):
                 state_indices,
                 state_weights,
             )
-            orbit_memory = self._orbit_memory_context(
-                modulus_index,
-                state_indices,
-                state_weights,
-            )
             query = self.transition(
                 transition_state,
                 modulus_vector,
                 memory,
-                orbit_memory,
             )
             candidate, entropy, probabilities = self._canonicalize(query)
-            candidate_weights, candidate_indices = probabilities.topk(
+            hard_indices = probabilities.argmax(dim=-1)
+            candidate_indices = hard_indices[:, None].expand(
+                -1,
                 MEMORY_TOP_K,
-                dim=-1,
             )
-            candidate_weights = candidate_weights / candidate_weights.sum(
-                dim=-1,
-                keepdim=True,
+            candidate_weights = probabilities.new_zeros(
+                probabilities.shape[0],
+                MEMORY_TOP_K,
             )
+            candidate_weights[:, 0] = 1.0
             active = time_steps > step
             state = torch.where(active[:, None], candidate, state)
             state_probabilities = torch.where(
@@ -268,58 +243,6 @@ class CanonicalResidueModel(nn.Module):
         ).sum(dim=1)
         return self.memory_projection(memory)
 
-    def _orbit_memory_context(
-        self,
-        modulus: Tensor,
-        residue_indices: Tensor,
-        residue_weights: Tensor,
-    ) -> Tensor:
-        integer_modulus = modulus.clamp_min(1)[:, None]
-        residues = residue_indices % integer_modulus
-        reflected = (integer_modulus - residues) % integer_modulus
-        representatives = torch.minimum(residues, reflected)
-        periods = torch.arange(
-            MIN_CANDIDATE_PERIOD,
-            MAX_CANDIDATE_PERIOD + 1,
-            device=residue_indices.device,
-        )
-        period_residues = representatives[..., None] % periods
-        period_reflections = (periods - period_residues) % periods
-        folded_residues = torch.minimum(
-            period_residues,
-            period_reflections,
-        )
-
-        base_keys = (
-            (modulus[:, None, None] * (MAX_CANDIDATE_PERIOD + 1)
-             + periods[None, None, :])
-            * (MAX_CANDIDATE_PERIOD + 1)
-            + folded_residues
-        )
-        head_offsets = torch.arange(
-            ORBIT_HEADS,
-            device=residue_indices.device,
-        )
-        keys = (
-            base_keys[:, :, None, :] * ORBIT_HEADS
-            + head_offsets[None, None, :, None]
-        ) % ORBIT_MEMORY_SIZE
-        memories = self.orbit_memory(keys)
-        selector = F.softmax(
-            self.orbit_selector(modulus).view(
-                modulus.shape[0],
-                ORBIT_HEADS,
-                NUM_CANDIDATE_PERIODS,
-            ),
-            dim=-1,
-        )
-        weighted_memories = (
-            memories
-            * residue_weights.to(memories.dtype)[:, :, None, None, None]
-            * selector[:, None, :, :, None]
-        ).sum(dim=(1, 3))
-        return self.orbit_memory_projection(weighted_memories.flatten(1))
-
     def _symmetric_state(
         self,
         state: Tensor,
@@ -354,7 +277,16 @@ class CanonicalResidueModel(nn.Module):
         )
         scale = self.code_log_scale.exp().clamp(max=30.0)
         probabilities = F.softmax(scale * (query @ codes.T), dim=-1)
-        state = probabilities @ codes
+        hard_probabilities = F.one_hot(
+            probabilities.argmax(dim=-1),
+            num_classes=RESIDUE_CODES,
+        ).to(probabilities.dtype)
+        straight_through = (
+            hard_probabilities
+            + probabilities
+            - probabilities.detach()
+        )
+        state = straight_through @ codes
         entropy = -(probabilities * probabilities.clamp_min(1e-8).log()).sum(
             dim=-1,
         )
