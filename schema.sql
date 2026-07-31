@@ -48,7 +48,8 @@ INSERT INTO architectures VALUES
     ('gated-decimal', 'Gated decimal-compositional recurrence', '0fb2e6ed7961cde865cba33c9febcc91dbde7c68', 40),
     ('factorized-memory', 'Factorized pair-memory recurrence', '512a4f6eba53384468a6ec6423e88704c1421d6b', 41),
     ('hard-factor-memory', 'Collision-supervised hard factor-memory recurrence', '39f67b1e96fbb1cd2ab6e1bdaa8bc7f2ac319915', 42),
-    ('coroot-fiber', 'First-step co-root fiber recurrence', 'e901bcedf92000d0026fc29fd50612f9ba0ae82e', 43)
+    ('coroot-fiber', 'First-step co-root fiber recurrence', 'e901bcedf92000d0026fc29fd50612f9ba0ae82e', 43),
+    ('factor-coordinate-table', 'Factor-coordinate table co-root recurrence', 'd52cc3d4b52cb1ebebd7850449d8b01cf391adc9', 44)
 ON CONFLICT (architecture_key) DO UPDATE SET
     architecture_label = excluded.architecture_label,
     source_commit = excluded.source_commit,
