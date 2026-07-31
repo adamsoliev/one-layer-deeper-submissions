@@ -1,4 +1,4 @@
-"""Dual-quotient orbit recurrence for One Layer Deeper."""
+"""First-step dual-quotient orbit recurrence for One Layer Deeper."""
 
 from __future__ import annotations
 
@@ -61,7 +61,7 @@ class RMSNorm(nn.Module):
 
 
 class SquaringTransition(nn.Module):
-    """Produce a query from residue and reflection-orbit memories."""
+    """Use a quotient-orbit signal only when entering the recurrence."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -94,7 +94,7 @@ class SquaringTransition(nn.Module):
 
 
 class CanonicalResidueModel(nn.Module):
-    """Route through learned quotient coordinates without testing divisibility."""
+    """Canonicalize the input orbit, then preserve the baseline recurrence."""
 
     def __init__(self, spec: ModelSpec) -> None:
         super().__init__()
@@ -146,7 +146,7 @@ class CanonicalResidueModel(nn.Module):
         self,
         input_ids: Tensor,
         attention_mask: Tensor | None = None,
-    ) -> tuple[Tensor, tuple[Tensor, Tensor]]:
+    ) -> tuple[Tensor, tuple[Tensor, Tensor, Tensor]]:
         if attention_mask is None:
             attention_mask = input_ids != PAD_TOKEN_ID
         else:
@@ -199,10 +199,14 @@ class CanonicalResidueModel(nn.Module):
                 state_indices,
                 state_weights,
             )
-            orbit_memory = self._orbit_memory_context(
-                modulus_index,
-                state_indices,
-                state_weights,
+            orbit_memory = (
+                self._orbit_memory_context(
+                    modulus_index,
+                    state_indices,
+                    state_weights,
+                )
+                if step == 0
+                else torch.zeros_like(modulus_vector)
             )
             query = self.transition(
                 transition_state,
