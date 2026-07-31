@@ -1,4 +1,4 @@
-"""Straight-through semantic residue recurrence for One Layer Deeper."""
+"""Supervised transition-table recurrence for One Layer Deeper."""
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ MAX_VALUE = 8_192
 RESIDUE_CODES = 2_048
 PAIR_MEMORY_SIZE = 131_071
 PAIR_MEMORY_WIDTH = 64
+DIRECT_MEMORY_SIZE = PAIR_MEMORY_SIZE
 MEMORY_TOP_K = 8
 MAX_OUTPUT_DIGITS = 4
 TRAIN_BATCH_SIZE = 512
@@ -86,7 +87,7 @@ class SquaringTransition(nn.Module):
 
 
 class CanonicalResidueModel(nn.Module):
-    """Compose hard semantic residue codes with straight-through gradients."""
+    """Anchor a direct reflection-keyed transition table to numeric residues."""
 
     def __init__(self, spec: ModelSpec) -> None:
         super().__init__()
@@ -96,6 +97,10 @@ class CanonicalResidueModel(nn.Module):
         self.pair_memory = nn.Embedding(
             PAIR_MEMORY_SIZE,
             PAIR_MEMORY_WIDTH,
+        )
+        self.direct_transition = nn.Embedding(
+            DIRECT_MEMORY_SIZE,
+            RESIDUE_CODES,
         )
         self.memory_projection = nn.Linear(
             PAIR_MEMORY_WIDTH,
@@ -113,6 +118,7 @@ class CanonicalResidueModel(nn.Module):
         )
         self.apply(self._initialize)
         nn.init.normal_(self.transition.query.weight, mean=0.0, std=0.01)
+        nn.init.zeros_(self.direct_transition.weight)
 
     @staticmethod
     def _initialize(module: nn.Module) -> None:
@@ -183,17 +189,23 @@ class CanonicalResidueModel(nn.Module):
                 modulus_vector,
                 memory,
             )
-            candidate, entropy, probabilities = self._canonicalize(query)
-            hard_indices = probabilities.argmax(dim=-1)
-            candidate_indices = hard_indices[:, None].expand(
-                -1,
-                MEMORY_TOP_K,
+            direct_logits = self._direct_transition_logits(
+                modulus_index,
+                state_indices,
+                state_weights,
             )
-            candidate_weights = probabilities.new_zeros(
-                probabilities.shape[0],
-                MEMORY_TOP_K,
+            candidate, entropy, probabilities = self._canonicalize(
+                query,
+                direct_logits,
             )
-            candidate_weights[:, 0] = 1.0
+            candidate_weights, candidate_indices = probabilities.topk(
+                MEMORY_TOP_K,
+                dim=-1,
+            )
+            candidate_weights = candidate_weights / candidate_weights.sum(
+                dim=-1,
+                keepdim=True,
+            )
             active = time_steps > step
             state = torch.where(active[:, None], candidate, state)
             state_probabilities = torch.where(
@@ -243,6 +255,24 @@ class CanonicalResidueModel(nn.Module):
         ).sum(dim=1)
         return self.memory_projection(memory)
 
+    def _direct_transition_logits(
+        self,
+        modulus: Tensor,
+        residue_indices: Tensor,
+        residue_weights: Tensor,
+    ) -> Tensor:
+        modulus = modulus.clamp_min(1)[:, None]
+        residues = residue_indices % modulus
+        reflected = (modulus - residues) % modulus
+        representatives = torch.minimum(residues, reflected)
+        keys = (
+            modulus * RESIDUE_CODES + representatives
+        ) % DIRECT_MEMORY_SIZE
+        logits = self.direct_transition(keys)
+        return (
+            logits * residue_weights.to(logits.dtype)[..., None]
+        ).sum(dim=1)
+
     def _symmetric_state(
         self,
         state: Tensor,
@@ -267,6 +297,7 @@ class CanonicalResidueModel(nn.Module):
     def _canonicalize(
         self,
         query: Tensor,
+        direct_logits: Tensor,
     ) -> tuple[Tensor, Tensor, Tensor]:
         query = F.normalize(self.query_norm(query), dim=-1)
         codes = F.normalize(
@@ -276,17 +307,11 @@ class CanonicalResidueModel(nn.Module):
             dim=-1,
         )
         scale = self.code_log_scale.exp().clamp(max=30.0)
-        probabilities = F.softmax(scale * (query @ codes.T), dim=-1)
-        hard_probabilities = F.one_hot(
-            probabilities.argmax(dim=-1),
-            num_classes=RESIDUE_CODES,
-        ).to(probabilities.dtype)
-        straight_through = (
-            hard_probabilities
-            + probabilities
-            - probabilities.detach()
+        probabilities = F.softmax(
+            scale * (query @ codes.T) + direct_logits,
+            dim=-1,
         )
-        state = straight_through @ codes
+        state = probabilities @ codes
         entropy = -(probabilities * probabilities.clamp_min(1e-8).log()).sum(
             dim=-1,
         )
