@@ -41,7 +41,8 @@ INSERT INTO architectures VALUES
     ('supervised-orbit', 'Orbit-supervised residue recurrence', '8bc0782c28c6dd222c654c66a98934f70a8b2d9b', 33),
     ('straight-through', 'Straight-through semantic residue recurrence', 'b08fdf173989a55f54c1019578815d1b5e24d929', 34),
     ('supervised-table', 'Supervised transition-table recurrence', 'c9fafeb21d846670664da42d455dc949d79f0664', 35),
-    ('binary-semantic', 'Binary-compositional supervised recurrence', '689647d9790c453cd14e082e7ec24c00f0ecc700', 36)
+    ('binary-semantic', 'Binary-compositional supervised recurrence', '689647d9790c453cd14e082e7ec24c00f0ecc700', 36),
+    ('modulus-program', 'Modulus-programmed supervised recurrence', 'e7a1794e432e3ecabfac6c5a3b39ba972aa321ce', 37)
 ON CONFLICT (architecture_key) DO UPDATE SET
     architecture_label = excluded.architecture_label,
     source_commit = excluded.source_commit,
