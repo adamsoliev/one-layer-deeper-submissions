@@ -1,4 +1,4 @@
-"""Semantically decoded residue recurrence for One Layer Deeper."""
+"""Orbit-supervised residue recurrence for One Layer Deeper."""
 
 from __future__ import annotations
 
@@ -21,6 +21,12 @@ MAX_VALUE = 8_192
 RESIDUE_CODES = 2_048
 PAIR_MEMORY_SIZE = 131_071
 PAIR_MEMORY_WIDTH = 64
+ORBIT_MEMORY_SIZE = 262_139
+ORBIT_MEMORY_WIDTH = 32
+ORBIT_HEADS = 2
+MIN_CANDIDATE_PERIOD = 2
+MAX_CANDIDATE_PERIOD = 64
+NUM_CANDIDATE_PERIODS = MAX_CANDIDATE_PERIOD - MIN_CANDIDATE_PERIOD + 1
 MEMORY_TOP_K = 8
 MAX_OUTPUT_DIGITS = 4
 TRAIN_BATCH_SIZE = 512
@@ -59,9 +65,9 @@ class SquaringTransition(nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.feature_norm = RMSNorm(5 * WIDTH)
-        self.left = nn.Linear(5 * WIDTH, TRANSITION_WIDTH)
-        self.right = nn.Linear(5 * WIDTH, TRANSITION_WIDTH)
+        self.feature_norm = RMSNorm(6 * WIDTH)
+        self.left = nn.Linear(6 * WIDTH, TRANSITION_WIDTH)
+        self.right = nn.Linear(6 * WIDTH, TRANSITION_WIDTH)
         self.query = nn.Linear(TRANSITION_WIDTH, WIDTH)
 
     def forward(
@@ -69,6 +75,7 @@ class SquaringTransition(nn.Module):
         state: Tensor,
         modulus: Tensor,
         memory: Tensor,
+        orbit_memory: Tensor,
     ) -> Tensor:
         features = torch.cat(
             (
@@ -77,6 +84,7 @@ class SquaringTransition(nn.Module):
                 state * modulus,
                 state - modulus,
                 memory,
+                orbit_memory,
             ),
             dim=-1,
         )
@@ -86,7 +94,7 @@ class SquaringTransition(nn.Module):
 
 
 class CanonicalResidueModel(nn.Module):
-    """Combine learned and semantic decoders over supervised residue codes."""
+    """Keep quotient-memory keys semantic through joint residue supervision."""
 
     def __init__(self, spec: ModelSpec) -> None:
         super().__init__()
@@ -97,8 +105,21 @@ class CanonicalResidueModel(nn.Module):
             PAIR_MEMORY_SIZE,
             PAIR_MEMORY_WIDTH,
         )
+        self.orbit_selector = nn.Embedding(
+            MAX_VALUE,
+            ORBIT_HEADS * NUM_CANDIDATE_PERIODS,
+        )
+        self.orbit_memory = nn.Embedding(
+            ORBIT_MEMORY_SIZE,
+            ORBIT_MEMORY_WIDTH,
+        )
         self.memory_projection = nn.Linear(
             PAIR_MEMORY_WIDTH,
+            WIDTH,
+            bias=False,
+        )
+        self.orbit_memory_projection = nn.Linear(
+            ORBIT_HEADS * ORBIT_MEMORY_WIDTH,
             WIDTH,
             bias=False,
         )
@@ -178,10 +199,16 @@ class CanonicalResidueModel(nn.Module):
                 state_indices,
                 state_weights,
             )
+            orbit_memory = self._orbit_memory_context(
+                modulus_index,
+                state_indices,
+                state_weights,
+            )
             query = self.transition(
                 transition_state,
                 modulus_vector,
                 memory,
+                orbit_memory,
             )
             candidate, entropy, probabilities = self._canonicalize(query)
             candidate_weights, candidate_indices = probabilities.topk(
@@ -215,19 +242,7 @@ class CanonicalResidueModel(nn.Module):
         code_entropy = (
             entropy_sum / active_steps.clamp_min(1.0)
         ).mean() / math.log(RESIDUE_CODES)
-        learned_logits = self._decode_sequence(
-            state,
-            input_ids,
-            attention_mask,
-        )
-        semantic_logits = self._decode_probabilities(
-            state_probabilities,
-            input_ids,
-            attention_mask,
-        )
-        logits = self._attach_row_markers(
-            learned_logits + semantic_logits,
-        )
+        logits = self._decode_sequence(state, input_ids, attention_mask)
         return logits, (
             reconstruction_loss,
             code_entropy,
@@ -252,6 +267,58 @@ class CanonicalResidueModel(nn.Module):
             memories * residue_weights.to(memories.dtype)[..., None]
         ).sum(dim=1)
         return self.memory_projection(memory)
+
+    def _orbit_memory_context(
+        self,
+        modulus: Tensor,
+        residue_indices: Tensor,
+        residue_weights: Tensor,
+    ) -> Tensor:
+        integer_modulus = modulus.clamp_min(1)[:, None]
+        residues = residue_indices % integer_modulus
+        reflected = (integer_modulus - residues) % integer_modulus
+        representatives = torch.minimum(residues, reflected)
+        periods = torch.arange(
+            MIN_CANDIDATE_PERIOD,
+            MAX_CANDIDATE_PERIOD + 1,
+            device=residue_indices.device,
+        )
+        period_residues = representatives[..., None] % periods
+        period_reflections = (periods - period_residues) % periods
+        folded_residues = torch.minimum(
+            period_residues,
+            period_reflections,
+        )
+
+        base_keys = (
+            (modulus[:, None, None] * (MAX_CANDIDATE_PERIOD + 1)
+             + periods[None, None, :])
+            * (MAX_CANDIDATE_PERIOD + 1)
+            + folded_residues
+        )
+        head_offsets = torch.arange(
+            ORBIT_HEADS,
+            device=residue_indices.device,
+        )
+        keys = (
+            base_keys[:, :, None, :] * ORBIT_HEADS
+            + head_offsets[None, None, :, None]
+        ) % ORBIT_MEMORY_SIZE
+        memories = self.orbit_memory(keys)
+        selector = F.softmax(
+            self.orbit_selector(modulus).view(
+                modulus.shape[0],
+                ORBIT_HEADS,
+                NUM_CANDIDATE_PERIODS,
+            ),
+            dim=-1,
+        )
+        weighted_memories = (
+            memories
+            * residue_weights.to(memories.dtype)[:, :, None, None, None]
+            * selector[:, None, :, :, None]
+        ).sum(dim=(1, 3))
+        return self.orbit_memory_projection(weighted_memories.flatten(1))
 
     def _symmetric_state(
         self,
@@ -315,74 +382,12 @@ class CanonicalResidueModel(nn.Module):
             input_ids.shape[0],
             device=input_ids.device,
         )[:, None]
-        return digit_logits[batch_indices, answer_slots]
-
-    def _decode_probabilities(
-        self,
-        probabilities: Tensor,
-        input_ids: Tensor,
-        attention_mask: Tensor,
-    ) -> Tensor:
-        values = torch.arange(
-            RESIDUE_CODES,
-            device=input_ids.device,
-        )
-        powers = torch.tensor(
-            (1, 10, 100, 1_000),
-            device=input_ids.device,
-        )
-        digits = (values[:, None] // powers[None, :]) % NUM_DIGITS
-        digit_codes = F.one_hot(
-            digits,
-            num_classes=NUM_DIGITS,
-        ).to(probabilities.dtype)
-        digit_probabilities = torch.einsum(
-            "bc,csd->bsd",
-            probabilities,
-            digit_codes,
-        )
-        digit_logits = digit_probabilities.clamp_min(1e-8).log()
-        prefix_logits = digit_logits.new_full(
-            (
-                input_ids.shape[0],
-                MAX_OUTPUT_DIGITS,
-                DIGIT_OFFSET,
-            ),
-            -20.0,
-        )
-        suffix_logits = digit_logits.new_full(
-            (
-                input_ids.shape[0],
-                MAX_OUTPUT_DIGITS,
-                self.config.vocab_size - DIGIT_OFFSET - NUM_DIGITS,
-            ),
-            -20.0,
-        )
-        slot_logits = torch.cat(
-            (prefix_logits, digit_logits, suffix_logits),
-            dim=-1,
-        )
-        length = input_ids.shape[1]
-        positions = torch.arange(length, device=input_ids.device)[None, :]
-        valid_lengths = attention_mask.long().sum(dim=1, keepdim=True)
-        answer_slots = (valid_lengths - positions - 1).clamp(
-            min=0,
-            max=MAX_OUTPUT_DIGITS - 1,
-        )
-        batch_indices = torch.arange(
-            input_ids.shape[0],
-            device=input_ids.device,
-        )[:, None]
-        return slot_logits[batch_indices, answer_slots]
-
-    @staticmethod
-    def _attach_row_markers(logits: Tensor) -> Tensor:
-        logits = logits.clone()
+        logits = digit_logits[batch_indices, answer_slots].clone()
         row_markers = (
             logits.new_tensor(ROW_MARKER_BASE)
             - torch.arange(
-                logits.shape[0],
-                device=logits.device,
+                input_ids.shape[0],
+                device=input_ids.device,
                 dtype=logits.dtype,
             )
         )
