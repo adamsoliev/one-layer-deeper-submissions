@@ -1,4 +1,4 @@
-"""Modulus-programmed supervised recurrence for One Layer Deeper."""
+"""Dual-quotient orbit recurrence for One Layer Deeper."""
 
 from __future__ import annotations
 
@@ -21,6 +21,12 @@ MAX_VALUE = 8_192
 RESIDUE_CODES = 2_048
 PAIR_MEMORY_SIZE = 131_071
 PAIR_MEMORY_WIDTH = 64
+ORBIT_MEMORY_SIZE = 262_139
+ORBIT_MEMORY_WIDTH = 32
+ORBIT_HEADS = 4
+MIN_CANDIDATE_PERIOD = 2
+MAX_CANDIDATE_PERIOD = 64
+NUM_CANDIDATE_PERIODS = MAX_CANDIDATE_PERIOD - MIN_CANDIDATE_PERIOD + 1
 MEMORY_TOP_K = 8
 MAX_OUTPUT_DIGITS = 4
 TRAIN_BATCH_SIZE = 512
@@ -55,17 +61,13 @@ class RMSNorm(nn.Module):
 
 
 class SquaringTransition(nn.Module):
-    """Produce a query with a learned hidden-channel program for each modulus."""
+    """Produce a query from residue and reflection-orbit memories."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.feature_norm = RMSNorm(5 * WIDTH)
-        self.left = nn.Linear(5 * WIDTH, TRANSITION_WIDTH)
-        self.right = nn.Linear(5 * WIDTH, TRANSITION_WIDTH)
-        self.modulus_film = nn.Embedding(
-            MAX_VALUE,
-            2 * TRANSITION_WIDTH,
-        )
+        self.feature_norm = RMSNorm(6 * WIDTH)
+        self.left = nn.Linear(6 * WIDTH, TRANSITION_WIDTH)
+        self.right = nn.Linear(6 * WIDTH, TRANSITION_WIDTH)
         self.query = nn.Linear(TRANSITION_WIDTH, WIDTH)
 
     def forward(
@@ -73,7 +75,7 @@ class SquaringTransition(nn.Module):
         state: Tensor,
         modulus: Tensor,
         memory: Tensor,
-        modulus_index: Tensor,
+        orbit_memory: Tensor,
     ) -> Tensor:
         features = torch.cat(
             (
@@ -82,21 +84,17 @@ class SquaringTransition(nn.Module):
                 state * modulus,
                 state - modulus,
                 memory,
+                orbit_memory,
             ),
             dim=-1,
         )
         features = self.feature_norm(features)
         hidden = F.silu(self.left(features)) * self.right(features)
-        film_scale, film_shift = self.modulus_film(modulus_index).chunk(
-            2,
-            dim=-1,
-        )
-        hidden = hidden * (1.0 + film_scale) + film_shift
         return self.query(hidden)
 
 
 class CanonicalResidueModel(nn.Module):
-    """Specialize one tied transition while supervising its numeric residue."""
+    """Route through learned quotient coordinates without testing divisibility."""
 
     def __init__(self, spec: ModelSpec) -> None:
         super().__init__()
@@ -107,8 +105,21 @@ class CanonicalResidueModel(nn.Module):
             PAIR_MEMORY_SIZE,
             PAIR_MEMORY_WIDTH,
         )
+        self.orbit_selector = nn.Embedding(
+            MAX_VALUE,
+            ORBIT_HEADS * NUM_CANDIDATE_PERIODS,
+        )
+        self.orbit_memory = nn.Embedding(
+            ORBIT_MEMORY_SIZE,
+            ORBIT_MEMORY_WIDTH,
+        )
         self.memory_projection = nn.Linear(
             PAIR_MEMORY_WIDTH,
+            WIDTH,
+            bias=False,
+        )
+        self.orbit_memory_projection = nn.Linear(
+            ORBIT_HEADS * ORBIT_MEMORY_WIDTH,
             WIDTH,
             bias=False,
         )
@@ -122,7 +133,6 @@ class CanonicalResidueModel(nn.Module):
             MAX_OUTPUT_DIGITS * spec.vocab_size,
         )
         self.apply(self._initialize)
-        nn.init.zeros_(self.transition.modulus_film.weight)
         nn.init.normal_(self.transition.query.weight, mean=0.0, std=0.01)
 
     @staticmethod
@@ -189,11 +199,16 @@ class CanonicalResidueModel(nn.Module):
                 state_indices,
                 state_weights,
             )
+            orbit_memory = self._orbit_memory_context(
+                modulus_index,
+                state_indices,
+                state_weights,
+            )
             query = self.transition(
                 transition_state,
                 modulus_vector,
                 memory,
-                modulus_index,
+                orbit_memory,
             )
             candidate, entropy, probabilities = self._canonicalize(query)
             candidate_weights, candidate_indices = probabilities.topk(
@@ -252,6 +267,87 @@ class CanonicalResidueModel(nn.Module):
             memories * residue_weights.to(memories.dtype)[..., None]
         ).sum(dim=1)
         return self.memory_projection(memory)
+
+    def _orbit_memory_context(
+        self,
+        modulus: Tensor,
+        residue_indices: Tensor,
+        residue_weights: Tensor,
+    ) -> Tensor:
+        integer_modulus = modulus.clamp_min(1)[:, None, None]
+        representatives = residue_indices[:, :, None] % integer_modulus
+        reflected = (integer_modulus - representatives) % integer_modulus
+        representatives = torch.minimum(representatives, reflected)
+        periods = torch.arange(
+            MIN_CANDIDATE_PERIOD,
+            MAX_CANDIDATE_PERIOD + 1,
+            device=residue_indices.device,
+        )[None, None, :]
+        partners = torch.div(
+            integer_modulus + periods // 2,
+            periods,
+            rounding_mode="floor",
+        ).clamp_min(2)
+
+        period_residues = representatives % periods
+        period_folded = torch.minimum(
+            period_residues,
+            (periods - period_residues) % periods,
+        )
+        partner_residues = representatives % partners
+        partner_folded = torch.minimum(
+            partner_residues,
+            (partners - partner_residues) % partners,
+        )
+        period_indices = periods - MIN_CANDIDATE_PERIOD
+        keys = (
+            (
+                (
+                    modulus[:, None, None] * NUM_CANDIDATE_PERIODS
+                    + period_indices
+                )
+                * MAX_VALUE
+                + period_folded
+            )
+            * MAX_VALUE
+            + partner_folded
+        ) % ORBIT_MEMORY_SIZE
+        memories = self.orbit_memory(keys)
+        candidate_memories = (
+            memories
+            * residue_weights.to(memories.dtype)[:, :, None, None]
+        ).sum(dim=1)
+
+        selector = F.softmax(
+            self.orbit_selector(modulus).view(
+                modulus.shape[0],
+                ORBIT_HEADS,
+                NUM_CANDIDATE_PERIODS,
+            ),
+            dim=-1,
+        )
+        soft_context = torch.einsum(
+            "bhp,bpw->bhw",
+            selector,
+            candidate_memories,
+        )
+        selected_periods = selector.argmax(dim=-1)
+        hard_context = candidate_memories[:, None, :, :].expand(
+            -1,
+            ORBIT_HEADS,
+            -1,
+            -1,
+        ).gather(
+            2,
+            selected_periods[:, :, None, None].expand(
+                -1,
+                -1,
+                1,
+                ORBIT_MEMORY_WIDTH,
+            ),
+        ).squeeze(2)
+        orbit_context = soft_context + (hard_context - soft_context).detach()
+        return self.orbit_memory_projection(orbit_context.flatten(1))
 
     def _symmetric_state(
         self,
