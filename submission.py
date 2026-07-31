@@ -1,4 +1,4 @@
-"""Semigroup-jump residue recurrence for One Layer Deeper."""
+"""Periodic-factor residue recurrence for One Layer Deeper."""
 
 from __future__ import annotations
 
@@ -22,12 +22,12 @@ RESIDUE_CODES = 2_048
 PAIR_MEMORY_SIZE = 131_071
 PAIR_MEMORY_WIDTH = 64
 MEMORY_TOP_K = 8
-MAX_JUMP = 3
-MAX_MACRO_STEPS = 3
+PERIOD_FREQUENCIES = 32
 MAX_OUTPUT_DIGITS = 4
 TRAIN_BATCH_SIZE = 512
 MAX_TRAINING_STEPS = 2_000
 WARMUP_STEPS = 50
+MAX_TRAIN_T = 3
 MAX_EVAL_T = 8
 PAD_TOKEN_ID = 0
 X_TOKEN_ID = 3
@@ -68,7 +68,7 @@ class SquaringTransition(nn.Module):
         state: Tensor,
         modulus: Tensor,
         memory: Tensor,
-        jump: Tensor,
+        periodic: Tensor,
     ) -> Tensor:
         features = torch.cat(
             (
@@ -77,7 +77,7 @@ class SquaringTransition(nn.Module):
                 state * modulus,
                 state - modulus,
                 memory,
-                jump,
+                periodic,
             ),
             dim=-1,
         )
@@ -87,16 +87,16 @@ class SquaringTransition(nn.Module):
 
 
 class CanonicalResidueModel(nn.Module):
-    """Compose learned one-, two-, or three-squaring macro transitions."""
+    """Learn complementary periods while preserving the r ↔ N-r symmetry."""
 
     def __init__(self, spec: ModelSpec) -> None:
         super().__init__()
         self.config = Config(spec.vocab_size, spec.max_seq_len)
         self.modulus_embedding = nn.Embedding(MAX_VALUE, WIDTH)
         self.residue_embedding = nn.Embedding(MAX_VALUE, WIDTH)
-        self.jump_embedding = nn.Embedding(MAX_JUMP + 1, WIDTH)
+        self.period_selector = nn.Embedding(MAX_VALUE, 1)
         self.pair_memory = nn.Embedding(
-            MAX_JUMP * PAIR_MEMORY_SIZE,
+            PAIR_MEMORY_SIZE,
             PAIR_MEMORY_WIDTH,
         )
         self.memory_projection = nn.Linear(
@@ -104,9 +104,13 @@ class CanonicalResidueModel(nn.Module):
             WIDTH,
             bias=False,
         )
+        self.period_projection = nn.Linear(
+            2 * PERIOD_FREQUENCIES,
+            WIDTH,
+        )
         self.modulus_norm = RMSNorm(WIDTH)
         self.residue_norm = RMSNorm(WIDTH)
-        self.jump_norm = RMSNorm(WIDTH)
+        self.period_norm = RMSNorm(WIDTH)
         self.query_norm = RMSNorm(WIDTH)
         self.transition = SquaringTransition()
         self.code_log_scale = nn.Parameter(torch.tensor(math.log(10.0)))
@@ -164,11 +168,8 @@ class CanonicalResidueModel(nn.Module):
         state_weights[:, 0] = 1.0
         entropy_sum = state.new_zeros(state.shape[0])
         active_steps = state.new_zeros(state.shape[0])
-        remaining_steps = time_steps.clone()
-        maximum_steps = 1 if self.training else MAX_MACRO_STEPS
-        for _ in range(maximum_steps):
-            jump = remaining_steps.clamp(min=1, max=MAX_JUMP)
-            jump_vector = self.jump_norm(self.jump_embedding(jump))
+        maximum_steps = MAX_TRAIN_T if self.training else MAX_EVAL_T
+        for step in range(maximum_steps):
             transition_state = self._symmetric_state(
                 state,
                 modulus_index,
@@ -179,13 +180,17 @@ class CanonicalResidueModel(nn.Module):
                 modulus_index,
                 state_indices,
                 state_weights,
-                jump,
+            )
+            periodic = self._periodic_context(
+                modulus_index,
+                state_indices,
+                state_weights,
             )
             query = self.transition(
                 transition_state,
                 modulus_vector,
                 memory,
-                jump_vector,
+                periodic,
             )
             candidate, entropy, probabilities = self._canonicalize(query)
             candidate_weights, candidate_indices = probabilities.topk(
@@ -196,7 +201,7 @@ class CanonicalResidueModel(nn.Module):
                 dim=-1,
                 keepdim=True,
             )
-            active = remaining_steps > 0
+            active = time_steps > step
             state = torch.where(active[:, None], candidate, state)
             state_indices = torch.where(
                 active[:, None],
@@ -210,11 +215,6 @@ class CanonicalResidueModel(nn.Module):
             )
             entropy_sum = entropy_sum + entropy * active
             active_steps = active_steps + active
-            remaining_steps = torch.where(
-                active,
-                remaining_steps - jump,
-                remaining_steps,
-            )
 
         code_entropy = (
             entropy_sum / active_steps.clamp_min(1.0)
@@ -227,24 +227,57 @@ class CanonicalResidueModel(nn.Module):
         modulus: Tensor,
         residue_indices: Tensor,
         residue_weights: Tensor,
-        jump: Tensor,
     ) -> Tensor:
         modulus = modulus.clamp_min(1)[:, None]
         residues = residue_indices % modulus
         reflected = (modulus - residues) % modulus
         representatives = torch.minimum(residues, reflected)
-        base_keys = (
+        keys = (
             modulus * RESIDUE_CODES + representatives
         ) % PAIR_MEMORY_SIZE
-        keys = (
-            (jump[:, None] - 1) * PAIR_MEMORY_SIZE
-            + base_keys
-        )
         memories = self.pair_memory(keys)
         memory = (
             memories * residue_weights.to(memories.dtype)[..., None]
         ).sum(dim=1)
         return self.memory_projection(memory)
+
+    def _periodic_context(
+        self,
+        modulus: Tensor,
+        residue_indices: Tensor,
+        residue_weights: Tensor,
+    ) -> Tensor:
+        integer_modulus = modulus.clamp_min(1)[:, None]
+        residues = residue_indices % integer_modulus
+        reflected = (integer_modulus - residues) % integer_modulus
+        representatives = torch.minimum(residues, reflected).to(
+            self.period_selector.weight.dtype,
+        )
+
+        continuous_modulus = modulus.to(representatives.dtype).clamp_min(4.0)
+        square_root = continuous_modulus.sqrt()
+        selector = torch.sigmoid(self.period_selector(modulus).squeeze(-1))
+        first_period = 2.0 + (square_root - 2.0) * selector
+        second_period = continuous_modulus / first_period
+        frequencies = torch.arange(
+            1,
+            PERIOD_FREQUENCIES + 1,
+            device=representatives.device,
+            dtype=representatives.dtype,
+        )
+        angles = math.tau * representatives[..., None] * frequencies
+        periodic_features = torch.cat(
+            (
+                torch.cos(angles / first_period[:, None, None]),
+                torch.cos(angles / second_period[:, None, None]),
+            ),
+            dim=-1,
+        )
+        weighted_features = (
+            periodic_features
+            * residue_weights.to(periodic_features.dtype)[..., None]
+        ).sum(dim=1)
+        return self.period_norm(self.period_projection(weighted_features))
 
     def _symmetric_state(
         self,
