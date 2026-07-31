@@ -1,4 +1,4 @@
-"""Joint-residue supervised recurrence for One Layer Deeper."""
+"""Semantically decoded residue recurrence for One Layer Deeper."""
 
 from __future__ import annotations
 
@@ -86,7 +86,7 @@ class SquaringTransition(nn.Module):
 
 
 class CanonicalResidueModel(nn.Module):
-    """Anchor final latent codes to the provided joint numeric target."""
+    """Combine learned and semantic decoders over supervised residue codes."""
 
     def __init__(self, spec: ModelSpec) -> None:
         super().__init__()
@@ -215,7 +215,19 @@ class CanonicalResidueModel(nn.Module):
         code_entropy = (
             entropy_sum / active_steps.clamp_min(1.0)
         ).mean() / math.log(RESIDUE_CODES)
-        logits = self._decode_sequence(state, input_ids, attention_mask)
+        learned_logits = self._decode_sequence(
+            state,
+            input_ids,
+            attention_mask,
+        )
+        semantic_logits = self._decode_probabilities(
+            state_probabilities,
+            input_ids,
+            attention_mask,
+        )
+        logits = self._attach_row_markers(
+            learned_logits + semantic_logits,
+        )
         return logits, (
             reconstruction_loss,
             code_entropy,
@@ -303,12 +315,74 @@ class CanonicalResidueModel(nn.Module):
             input_ids.shape[0],
             device=input_ids.device,
         )[:, None]
-        logits = digit_logits[batch_indices, answer_slots].clone()
+        return digit_logits[batch_indices, answer_slots]
+
+    def _decode_probabilities(
+        self,
+        probabilities: Tensor,
+        input_ids: Tensor,
+        attention_mask: Tensor,
+    ) -> Tensor:
+        values = torch.arange(
+            RESIDUE_CODES,
+            device=input_ids.device,
+        )
+        powers = torch.tensor(
+            (1, 10, 100, 1_000),
+            device=input_ids.device,
+        )
+        digits = (values[:, None] // powers[None, :]) % NUM_DIGITS
+        digit_codes = F.one_hot(
+            digits,
+            num_classes=NUM_DIGITS,
+        ).to(probabilities.dtype)
+        digit_probabilities = torch.einsum(
+            "bc,csd->bsd",
+            probabilities,
+            digit_codes,
+        )
+        digit_logits = digit_probabilities.clamp_min(1e-8).log()
+        prefix_logits = digit_logits.new_full(
+            (
+                input_ids.shape[0],
+                MAX_OUTPUT_DIGITS,
+                DIGIT_OFFSET,
+            ),
+            -20.0,
+        )
+        suffix_logits = digit_logits.new_full(
+            (
+                input_ids.shape[0],
+                MAX_OUTPUT_DIGITS,
+                self.config.vocab_size - DIGIT_OFFSET - NUM_DIGITS,
+            ),
+            -20.0,
+        )
+        slot_logits = torch.cat(
+            (prefix_logits, digit_logits, suffix_logits),
+            dim=-1,
+        )
+        length = input_ids.shape[1]
+        positions = torch.arange(length, device=input_ids.device)[None, :]
+        valid_lengths = attention_mask.long().sum(dim=1, keepdim=True)
+        answer_slots = (valid_lengths - positions - 1).clamp(
+            min=0,
+            max=MAX_OUTPUT_DIGITS - 1,
+        )
+        batch_indices = torch.arange(
+            input_ids.shape[0],
+            device=input_ids.device,
+        )[:, None]
+        return slot_logits[batch_indices, answer_slots]
+
+    @staticmethod
+    def _attach_row_markers(logits: Tensor) -> Tensor:
+        logits = logits.clone()
         row_markers = (
             logits.new_tensor(ROW_MARKER_BASE)
             - torch.arange(
-                input_ids.shape[0],
-                device=input_ids.device,
+                logits.shape[0],
+                device=logits.device,
                 dtype=logits.dtype,
             )
         )
