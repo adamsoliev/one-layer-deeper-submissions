@@ -1,4 +1,4 @@
-"""Supervised transition-table recurrence for One Layer Deeper."""
+"""Binary-compositional supervised recurrence for One Layer Deeper."""
 
 from __future__ import annotations
 
@@ -19,9 +19,9 @@ WIDTH = 256
 TRANSITION_WIDTH = 1_024
 MAX_VALUE = 8_192
 RESIDUE_CODES = 2_048
+BINARY_BITS = 13
 PAIR_MEMORY_SIZE = 131_071
 PAIR_MEMORY_WIDTH = 64
-DIRECT_MEMORY_SIZE = PAIR_MEMORY_SIZE
 MEMORY_TOP_K = 8
 MAX_OUTPUT_DIGITS = 4
 TRAIN_BATCH_SIZE = 512
@@ -87,20 +87,26 @@ class SquaringTransition(nn.Module):
 
 
 class CanonicalResidueModel(nn.Module):
-    """Anchor a direct reflection-keyed transition table to numeric residues."""
+    """Share binary value structure across supervised residue codes."""
 
     def __init__(self, spec: ModelSpec) -> None:
         super().__init__()
         self.config = Config(spec.vocab_size, spec.max_seq_len)
         self.modulus_embedding = nn.Embedding(MAX_VALUE, WIDTH)
         self.residue_embedding = nn.Embedding(MAX_VALUE, WIDTH)
+        self.modulus_binary_projection = nn.Linear(
+            BINARY_BITS,
+            WIDTH,
+            bias=False,
+        )
+        self.residue_binary_projection = nn.Linear(
+            BINARY_BITS,
+            WIDTH,
+            bias=False,
+        )
         self.pair_memory = nn.Embedding(
             PAIR_MEMORY_SIZE,
             PAIR_MEMORY_WIDTH,
-        )
-        self.direct_transition = nn.Embedding(
-            DIRECT_MEMORY_SIZE,
-            RESIDUE_CODES,
         )
         self.memory_projection = nn.Linear(
             PAIR_MEMORY_WIDTH,
@@ -118,7 +124,6 @@ class CanonicalResidueModel(nn.Module):
         )
         self.apply(self._initialize)
         nn.init.normal_(self.transition.query.weight, mean=0.0, std=0.01)
-        nn.init.zeros_(self.direct_transition.weight)
 
     @staticmethod
     def _initialize(module: nn.Module) -> None:
@@ -144,11 +149,15 @@ class CanonicalResidueModel(nn.Module):
         modulus_index = modulus.clamp(max=MAX_VALUE - 1)
         residue_index = residue.clamp(max=MAX_VALUE - 1)
         modulus_vector = self.modulus_norm(
-            self.modulus_embedding(modulus_index),
+            self.modulus_embedding(modulus_index)
+            + self.modulus_binary_projection(
+                self._binary_features(
+                    modulus_index,
+                    self.modulus_embedding.weight.dtype,
+                ),
+            ),
         )
-        initial_state = self.residue_norm(
-            self.residue_embedding(residue_index),
-        )
+        initial_state = self._residue_code(residue_index)
         reconstruction_loss = self._reconstruction_loss(
             initial_state,
             input_ids,
@@ -189,15 +198,7 @@ class CanonicalResidueModel(nn.Module):
                 modulus_vector,
                 memory,
             )
-            direct_logits = self._direct_transition_logits(
-                modulus_index,
-                state_indices,
-                state_weights,
-            )
-            candidate, entropy, probabilities = self._canonicalize(
-                query,
-                direct_logits,
-            )
+            candidate, entropy, probabilities = self._canonicalize(query)
             candidate_weights, candidate_indices = probabilities.topk(
                 MEMORY_TOP_K,
                 dim=-1,
@@ -255,24 +256,6 @@ class CanonicalResidueModel(nn.Module):
         ).sum(dim=1)
         return self.memory_projection(memory)
 
-    def _direct_transition_logits(
-        self,
-        modulus: Tensor,
-        residue_indices: Tensor,
-        residue_weights: Tensor,
-    ) -> Tensor:
-        modulus = modulus.clamp_min(1)[:, None]
-        residues = residue_indices % modulus
-        reflected = (modulus - residues) % modulus
-        representatives = torch.minimum(residues, reflected)
-        keys = (
-            modulus * RESIDUE_CODES + representatives
-        ) % DIRECT_MEMORY_SIZE
-        logits = self.direct_transition(keys)
-        return (
-            logits * residue_weights.to(logits.dtype)[..., None]
-        ).sum(dim=1)
-
     def _symmetric_state(
         self,
         state: Tensor,
@@ -285,9 +268,7 @@ class CanonicalResidueModel(nn.Module):
         reflected = ((modulus - residues) % modulus).clamp(
             max=MAX_VALUE - 1,
         )
-        reflected_codes = self.residue_norm(
-            self.residue_embedding(reflected),
-        )
+        reflected_codes = self._residue_code(reflected)
         reflected_state = (
             reflected_codes
             * residue_weights.to(reflected_codes.dtype)[..., None]
@@ -297,25 +278,39 @@ class CanonicalResidueModel(nn.Module):
     def _canonicalize(
         self,
         query: Tensor,
-        direct_logits: Tensor,
     ) -> tuple[Tensor, Tensor, Tensor]:
         query = F.normalize(self.query_norm(query), dim=-1)
+        code_values = torch.arange(
+            RESIDUE_CODES,
+            device=query.device,
+        )
         codes = F.normalize(
-            self.residue_norm(
-                self.residue_embedding.weight[:RESIDUE_CODES],
-            ),
+            self._residue_code(code_values),
             dim=-1,
         )
         scale = self.code_log_scale.exp().clamp(max=30.0)
-        probabilities = F.softmax(
-            scale * (query @ codes.T) + direct_logits,
-            dim=-1,
-        )
+        probabilities = F.softmax(scale * (query @ codes.T), dim=-1)
         state = probabilities @ codes
         entropy = -(probabilities * probabilities.clamp_min(1e-8).log()).sum(
             dim=-1,
         )
         return self.residue_norm(state), entropy, probabilities
+
+    def _residue_code(self, value: Tensor) -> Tensor:
+        binary = self._binary_features(
+            value,
+            self.residue_embedding.weight.dtype,
+        )
+        return self.residue_norm(
+            self.residue_embedding(value)
+            + self.residue_binary_projection(binary),
+        )
+
+    @staticmethod
+    def _binary_features(value: Tensor, dtype: torch.dtype) -> Tensor:
+        shifts = torch.arange(BINARY_BITS, device=value.device)
+        bits = ((value[..., None] >> shifts) & 1).to(dtype)
+        return bits * 2.0 - 1.0
 
     def _decode_sequence(
         self,
