@@ -1,4 +1,4 @@
-"""Factorized pair-memory recurrence for One Layer Deeper."""
+"""Collision-supervised hard factor-memory recurrence."""
 
 from __future__ import annotations
 
@@ -19,7 +19,13 @@ WIDTH = 256
 TRANSITION_WIDTH = 1_024
 MAX_VALUE = 8_192
 RESIDUE_CODES = 2_048
+PAIR_MEMORY_SIZE = 131_071
 PAIR_MEMORY_WIDTH = 64
+MIN_CANDIDATE_FACTOR = 2
+MAX_CANDIDATE_FACTOR = 64
+NUM_CANDIDATE_FACTORS = (
+    MAX_CANDIDATE_FACTOR - MIN_CANDIDATE_FACTOR + 1
+)
 MEMORY_TOP_K = 8
 MAX_OUTPUT_DIGITS = 4
 TRAIN_BATCH_SIZE = 512
@@ -85,22 +91,25 @@ class SquaringTransition(nn.Module):
 
 
 class CanonicalResidueModel(nn.Module):
-    """Share pair memories through a low-rank modulus-residue factorization."""
+    """Canonicalize CRT co-roots through a collision-learned factor."""
 
     def __init__(self, spec: ModelSpec) -> None:
         super().__init__()
         self.config = Config(spec.vocab_size, spec.max_seq_len)
         self.modulus_embedding = nn.Embedding(MAX_VALUE, WIDTH)
         self.residue_embedding = nn.Embedding(MAX_VALUE, WIDTH)
-        self.modulus_pair_memory = nn.Embedding(
+        self.pair_memory = nn.Embedding(
+            PAIR_MEMORY_SIZE,
+            PAIR_MEMORY_WIDTH,
+        )
+        self.factor_memory = nn.Embedding(
+            PAIR_MEMORY_SIZE,
+            PAIR_MEMORY_WIDTH,
+        )
+        self.factor_selector = nn.Embedding(
             MAX_VALUE,
-            PAIR_MEMORY_WIDTH,
+            NUM_CANDIDATE_FACTORS,
         )
-        self.residue_pair_memory = nn.Embedding(
-            RESIDUE_CODES,
-            PAIR_MEMORY_WIDTH,
-        )
-        self.memory_norm = RMSNorm(PAIR_MEMORY_WIDTH)
         self.memory_projection = nn.Linear(
             PAIR_MEMORY_WIDTH,
             WIDTH,
@@ -117,6 +126,8 @@ class CanonicalResidueModel(nn.Module):
         )
         self.apply(self._initialize)
         nn.init.normal_(self.transition.query.weight, mean=0.0, std=0.01)
+        nn.init.zeros_(self.factor_memory.weight)
+        nn.init.zeros_(self.factor_selector.weight)
 
     @staticmethod
     def _initialize(module: nn.Module) -> None:
@@ -129,7 +140,7 @@ class CanonicalResidueModel(nn.Module):
         self,
         input_ids: Tensor,
         attention_mask: Tensor | None = None,
-    ) -> tuple[Tensor, tuple[Tensor, Tensor, Tensor]]:
+    ) -> tuple[Tensor, tuple[Tensor, ...]]:
         if attention_mask is None:
             attention_mask = input_ids != PAD_TOKEN_ID
         else:
@@ -143,6 +154,10 @@ class CanonicalResidueModel(nn.Module):
         residue_index = residue.clamp(max=MAX_VALUE - 1)
         modulus_vector = self.modulus_norm(
             self.modulus_embedding(modulus_index),
+        )
+        factor_probabilities = F.softmax(
+            self.factor_selector(modulus_index),
+            dim=-1,
         )
         initial_state = self.residue_norm(
             self.residue_embedding(residue_index),
@@ -181,6 +196,12 @@ class CanonicalResidueModel(nn.Module):
                 modulus_index,
                 state_indices,
                 state_weights,
+            )
+            memory = memory + self._factor_memory_context(
+                modulus_index,
+                state_indices,
+                state_weights,
+                factor_probabilities,
             )
             query = self.transition(
                 transition_state,
@@ -224,6 +245,10 @@ class CanonicalResidueModel(nn.Module):
             reconstruction_loss,
             code_entropy,
             state_probabilities,
+            factor_probabilities,
+            modulus,
+            residue,
+            time_steps,
         )
 
     def _memory_context(
@@ -236,15 +261,56 @@ class CanonicalResidueModel(nn.Module):
         residues = residue_indices % modulus
         reflected = (modulus - residues) % modulus
         representatives = torch.minimum(residues, reflected)
-        modulus_memories = self.modulus_pair_memory(
-            modulus.clamp(max=MAX_VALUE - 1),
+        keys = (
+            modulus * RESIDUE_CODES + representatives
+        ) % PAIR_MEMORY_SIZE
+        memories = self.pair_memory(keys)
+        memory = (
+            memories * residue_weights.to(memories.dtype)[..., None]
+        ).sum(dim=1)
+        return self.memory_projection(memory)
+
+    def _factor_memory_context(
+        self,
+        modulus: Tensor,
+        residue_indices: Tensor,
+        residue_weights: Tensor,
+        factor_probabilities: Tensor,
+    ) -> Tensor:
+        integer_modulus = modulus.clamp_min(1)[:, None]
+        factors = (
+            factor_probabilities.argmax(dim=-1)
+            + MIN_CANDIDATE_FACTOR
+        )[:, None]
+        partners = torch.div(
+            integer_modulus + factors // 2,
+            factors,
+            rounding_mode="floor",
+        ).clamp(min=2, max=MAX_VALUE - 1)
+        residues = residue_indices % integer_modulus
+        factor_residues = residues % factors
+        factor_coordinates = torch.minimum(
+            factor_residues,
+            (factors - factor_residues) % factors,
         )
-        residue_memories = self.residue_pair_memory(
-            representatives % RESIDUE_CODES,
+        partner_residues = residues % partners
+        partner_coordinates = torch.minimum(
+            partner_residues,
+            (partners - partner_residues) % partners,
         )
-        memories = self.memory_norm(
-            modulus_memories * residue_memories,
-        )
+        keys = (
+            (
+                (
+                    modulus[:, None] * (MAX_CANDIDATE_FACTOR + 1)
+                    + factors
+                )
+                * MAX_VALUE
+                + factor_coordinates
+            )
+            * MAX_VALUE
+            + partner_coordinates
+        ) % PAIR_MEMORY_SIZE
+        memories = self.factor_memory(keys)
         memory = (
             memories * residue_weights.to(memories.dtype)[..., None]
         ).sum(dim=1)
@@ -441,18 +507,105 @@ def build_optimizer(
     return OptimizerBundle(optimizer, scheduler)
 
 
-def training_loss(logits: Tensor, labels: Tensor, auxiliary: object) -> Tensor:
-    if not isinstance(auxiliary, tuple) or len(auxiliary) != 3:
-        raise TypeError(
-            "auxiliary output must contain reconstruction, entropy, and residues",
+def _factor_collision_loss(
+    factor_probabilities: Tensor,
+    modulus: Tensor,
+    residue: Tensor,
+    time_steps: Tensor,
+    target_residues: Tensor,
+    valid_rows: Tensor,
+) -> Tensor:
+    selected = valid_rows.nonzero(as_tuple=False).flatten()
+    zero = factor_probabilities.sum() * 0.0
+    if selected.numel() < 2:
+        return zero
+
+    groups = (
+        (
+            modulus[selected] * (MAX_TRAIN_T + 1)
+            + time_steps[selected]
         )
-    reconstruction_loss, code_entropy, residue_probabilities = auxiliary
+        * RESIDUE_CODES
+        + target_residues[selected]
+    )
+    pairs = torch.triu(
+        groups[:, None] == groups[None, :],
+        diagonal=1,
+    ).nonzero(as_tuple=False)
+    if pairs.numel() == 0:
+        return zero
+
+    integer_modulus = modulus[selected].clamp_min(1)[:, None]
+    factors = torch.arange(
+        MIN_CANDIDATE_FACTOR,
+        MAX_CANDIDATE_FACTOR + 1,
+        device=modulus.device,
+    )[None, :]
+    partners = torch.div(
+        integer_modulus + factors // 2,
+        factors,
+        rounding_mode="floor",
+    ).clamp(min=2, max=MAX_VALUE - 1)
+    residues = residue[selected, None] % integer_modulus
+    factor_residues = residues % factors
+    factor_coordinates = torch.minimum(
+        factor_residues,
+        (factors - factor_residues) % factors,
+    )
+    partner_residues = residues % partners
+    partner_coordinates = torch.minimum(
+        partner_residues,
+        (partners - partner_residues) % partners,
+    )
+
+    left, right = pairs[:, 0], pairs[:, 1]
+    matches = (
+        (factor_coordinates[left] == factor_coordinates[right])
+        & (partner_coordinates[left] == partner_coordinates[right])
+    )
+    pair_probabilities = 0.5 * (
+        factor_probabilities[selected[left]]
+        + factor_probabilities[selected[right]]
+    )
+    matching_mass = (
+        pair_probabilities * matches.to(pair_probabilities.dtype)
+    ).sum(dim=-1)
+    usable = matches.any(dim=-1)
+    return -(
+        matching_mass.clamp_min(1e-8).log()
+        * usable.to(matching_mass.dtype)
+    ).sum() / usable.sum().clamp_min(1)
+
+
+def training_loss(logits: Tensor, labels: Tensor, auxiliary: object) -> Tensor:
+    if not isinstance(auxiliary, tuple) or len(auxiliary) != 7:
+        raise TypeError(
+            "auxiliary output must contain residue and factor supervision state",
+        )
+    (
+        reconstruction_loss,
+        code_entropy,
+        residue_probabilities,
+        factor_probabilities,
+        modulus,
+        residue,
+        time_steps,
+    ) = auxiliary
     if not isinstance(reconstruction_loss, Tensor) or reconstruction_loss.ndim != 0:
         raise TypeError("reconstruction loss must be a scalar tensor")
     if not isinstance(code_entropy, Tensor) or code_entropy.ndim != 0:
         raise TypeError("code entropy must be a scalar tensor")
     if not isinstance(residue_probabilities, Tensor) or residue_probabilities.ndim != 2:
         raise TypeError("residue probabilities must be a rank-2 tensor")
+    if not isinstance(factor_probabilities, Tensor) or factor_probabilities.ndim != 2:
+        raise TypeError("factor probabilities must be a rank-2 tensor")
+    for name, value in (
+        ("modulus", modulus),
+        ("residue", residue),
+        ("time steps", time_steps),
+    ):
+        if not isinstance(value, Tensor) or value.ndim != 1:
+            raise TypeError(f"{name} must be a rank-1 tensor")
 
     row_indices = (
         ROW_MARKER_BASE - logits[:, PAD_TOKEN_ID]
@@ -493,11 +646,20 @@ def training_loss(logits: Tensor, labels: Tensor, auxiliary: object) -> Tensor:
     residue_loss = -(
         supervised_log_probabilities * valid_rows.to(supervised_log_probabilities.dtype)
     ).sum() / valid_rows.sum().clamp_min(1)
+    factor_collision_loss = _factor_collision_loss(
+        factor_probabilities,
+        modulus,
+        residue,
+        time_steps,
+        target_residues,
+        valid_rows,
+    )
     return (
         F.cross_entropy(logits, labels)
         + RECONSTRUCTION_WEIGHT * reconstruction_loss
         + ENTROPY_WEIGHT * code_entropy
         + RESIDUE_SUPERVISION_WEIGHT * residue_loss
+        + factor_collision_loss
     )
 
 
