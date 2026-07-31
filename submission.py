@@ -1,4 +1,4 @@
-"""Factor-coordinate table recurrence for One Layer Deeper."""
+"""Hard-routed factor-table recurrence for One Layer Deeper."""
 
 from __future__ import annotations
 
@@ -93,7 +93,7 @@ class SquaringTransition(nn.Module):
 
 
 class CanonicalResidueModel(nn.Module):
-    """Compose a co-root fiber with shared local transition tables."""
+    """Learn local transitions softly and route them discretely at inference."""
 
     def __init__(self, spec: ModelSpec) -> None:
         super().__init__()
@@ -214,13 +214,22 @@ class CanonicalResidueModel(nn.Module):
                 modulus_vector,
                 memory,
             )
-            candidate, entropy, probabilities = self._canonicalize(
+            (
+                candidate,
+                entropy,
+                probabilities,
+                coordinate_logits,
+                coordinate_factors,
+            ) = self._canonicalize(
                 query,
                 modulus_index,
                 state_indices,
                 state_weights,
                 factor_probabilities,
             )
+            if step == 0:
+                first_coordinate_logits = coordinate_logits
+                first_coordinate_factors = coordinate_factors
             candidate_weights, candidate_indices = probabilities.topk(
                 MEMORY_TOP_K,
                 dim=-1,
@@ -261,6 +270,8 @@ class CanonicalResidueModel(nn.Module):
             modulus,
             residue,
             time_steps,
+            first_coordinate_logits,
+            first_coordinate_factors,
         )
 
     def _memory_context(
@@ -370,7 +381,7 @@ class CanonicalResidueModel(nn.Module):
         residue_indices: Tensor,
         residue_weights: Tensor,
         factor_probabilities: Tensor,
-    ) -> tuple[Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         query = F.normalize(self.query_norm(query), dim=-1)
         code_values = torch.arange(
             RESIDUE_CODES,
@@ -437,12 +448,39 @@ class CanonicalResidueModel(nn.Module):
             low_logits.gather(1, low_output_coordinates)
             + high_logits.gather(1, high_output_coordinates)
         )
-        probabilities = F.softmax(scores + coordinate_scores, dim=-1)
+        coordinate_logits = torch.stack((low_logits, high_logits), dim=1)
+        coordinate_factors = torch.cat((low_factors, high_factors), dim=1)
+        if self.training:
+            scores = scores + coordinate_scores
+        else:
+            predicted_coordinates = coordinate_logits.argmax(dim=-1)
+            valid_coordinates = (
+                (candidates < integer_modulus)
+                & (
+                    low_output_coordinates
+                    == predicted_coordinates[:, :1]
+                )
+                & (
+                    high_output_coordinates
+                    == predicted_coordinates[:, 1:]
+                )
+            )
+            scores = scores.masked_fill(
+                ~valid_coordinates,
+                torch.finfo(scores.dtype).min,
+            )
+        probabilities = F.softmax(scores, dim=-1)
         state = probabilities @ codes
         entropy = -(probabilities * probabilities.clamp_min(1e-8).log()).sum(
             dim=-1,
         )
-        return self.residue_norm(state), entropy, probabilities
+        return (
+            self.residue_norm(state),
+            entropy,
+            probabilities,
+            coordinate_logits,
+            coordinate_factors,
+        )
 
     def _decode_sequence(
         self,
@@ -662,7 +700,7 @@ def _factor_collision_loss(
 
 
 def training_loss(logits: Tensor, labels: Tensor, auxiliary: object) -> Tensor:
-    if not isinstance(auxiliary, tuple) or len(auxiliary) != 7:
+    if not isinstance(auxiliary, tuple) or len(auxiliary) != 9:
         raise TypeError(
             "auxiliary output must contain residue and factor supervision state",
         )
@@ -674,6 +712,8 @@ def training_loss(logits: Tensor, labels: Tensor, auxiliary: object) -> Tensor:
         modulus,
         residue,
         time_steps,
+        coordinate_logits,
+        coordinate_factors,
     ) = auxiliary
     if not isinstance(reconstruction_loss, Tensor) or reconstruction_loss.ndim != 0:
         raise TypeError("reconstruction loss must be a scalar tensor")
@@ -690,6 +730,10 @@ def training_loss(logits: Tensor, labels: Tensor, auxiliary: object) -> Tensor:
     ):
         if not isinstance(value, Tensor) or value.ndim != 1:
             raise TypeError(f"{name} must be a rank-1 tensor")
+    if not isinstance(coordinate_logits, Tensor) or coordinate_logits.ndim != 3:
+        raise TypeError("coordinate logits must be a rank-3 tensor")
+    if not isinstance(coordinate_factors, Tensor) or coordinate_factors.ndim != 2:
+        raise TypeError("coordinate factors must be a rank-2 tensor")
 
     row_indices = (
         ROW_MARKER_BASE - logits[:, PAD_TOKEN_ID]
@@ -738,12 +782,31 @@ def training_loss(logits: Tensor, labels: Tensor, auxiliary: object) -> Tensor:
         target_residues,
         valid_rows,
     )
+    coordinate_rows = valid_rows & (time_steps == 1)
+    selected_coordinate_rows = coordinate_rows.nonzero(
+        as_tuple=False,
+    ).flatten()
+    if selected_coordinate_rows.numel() == 0:
+        coordinate_loss = coordinate_logits.sum() * 0.0
+    else:
+        coordinate_targets = (
+            target_residues[:, None]
+            % coordinate_factors.clamp_min(1)
+        ) % COORDINATE_CLASSES
+        coordinate_loss = F.cross_entropy(
+            coordinate_logits[selected_coordinate_rows].float().reshape(
+                -1,
+                COORDINATE_CLASSES,
+            ),
+            coordinate_targets[selected_coordinate_rows].reshape(-1),
+        )
     return (
         F.cross_entropy(logits, labels)
         + RECONSTRUCTION_WEIGHT * reconstruction_loss
         + ENTROPY_WEIGHT * code_entropy
         + RESIDUE_SUPERVISION_WEIGHT * residue_loss
         + factor_collision_loss
+        + coordinate_loss
     )
 
 
