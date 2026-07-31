@@ -46,7 +46,8 @@ INSERT INTO architectures VALUES
     ('dual-orbit', 'Dual-quotient orbit recurrence', '45f01b75dc3873497b5805a3af0522e8c883fcff', 38),
     ('first-orbit', 'First-step dual-quotient orbit recurrence', 'a0feda98f7f05ca6bf8e705857668fbbe0a78f53', 39),
     ('gated-decimal', 'Gated decimal-compositional recurrence', '0fb2e6ed7961cde865cba33c9febcc91dbde7c68', 40),
-    ('factorized-memory', 'Factorized pair-memory recurrence', '512a4f6eba53384468a6ec6423e88704c1421d6b', 41)
+    ('factorized-memory', 'Factorized pair-memory recurrence', '512a4f6eba53384468a6ec6423e88704c1421d6b', 41),
+    ('hard-factor-memory', 'Collision-supervised hard factor-memory recurrence', '39f67b1e96fbb1cd2ab6e1bdaa8bc7f2ac319915', 42)
 ON CONFLICT (architecture_key) DO UPDATE SET
     architecture_label = excluded.architecture_label,
     source_commit = excluded.source_commit,
