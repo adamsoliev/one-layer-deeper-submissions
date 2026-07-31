@@ -1,4 +1,4 @@
-"""Gated decimal-compositional recurrence for One Layer Deeper."""
+"""Factorized pair-memory recurrence for One Layer Deeper."""
 
 from __future__ import annotations
 
@@ -19,9 +19,6 @@ WIDTH = 256
 TRANSITION_WIDTH = 1_024
 MAX_VALUE = 8_192
 RESIDUE_CODES = 2_048
-DIGIT_WIDTH = 32
-NUMERIC_DIGITS = 4
-PAIR_MEMORY_SIZE = 131_071
 PAIR_MEMORY_WIDTH = 64
 MEMORY_TOP_K = 8
 MAX_OUTPUT_DIGITS = 4
@@ -56,38 +53,6 @@ class RMSNorm(nn.Module):
         return F.rms_norm(hidden, (hidden.shape[-1],), self.weight)
 
 
-class DecimalBranch(nn.Module):
-    """Compose values from shared digit and significance embeddings."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.digit_embedding = nn.Embedding(NUM_DIGITS, DIGIT_WIDTH)
-        self.significance_embedding = nn.Embedding(
-            NUMERIC_DIGITS,
-            DIGIT_WIDTH,
-        )
-        self.projection = nn.Linear(
-            NUMERIC_DIGITS * DIGIT_WIDTH,
-            WIDTH,
-        )
-
-    def forward(self, value: Tensor) -> Tensor:
-        powers = torch.tensor(
-            (1, 10, 100, 1_000),
-            device=value.device,
-            dtype=value.dtype,
-        )
-        digits = (value[..., None] // powers) % NUM_DIGITS
-        significance = torch.arange(
-            NUMERIC_DIGITS,
-            device=value.device,
-        )
-        embedded = self.digit_embedding(digits) + self.significance_embedding(
-            significance,
-        )
-        return self.projection(embedded.flatten(start_dim=-2))
-
-
 class SquaringTransition(nn.Module):
     """Produce a codebook query from residue, modulus, and learned memory."""
 
@@ -120,21 +85,22 @@ class SquaringTransition(nn.Module):
 
 
 class CanonicalResidueModel(nn.Module):
-    """Adopt shared decimal structure only when supervised gradients favor it."""
+    """Share pair memories through a low-rank modulus-residue factorization."""
 
     def __init__(self, spec: ModelSpec) -> None:
         super().__init__()
         self.config = Config(spec.vocab_size, spec.max_seq_len)
         self.modulus_embedding = nn.Embedding(MAX_VALUE, WIDTH)
         self.residue_embedding = nn.Embedding(MAX_VALUE, WIDTH)
-        self.decimal_branch = DecimalBranch()
-        self.modulus_decimal_projection = nn.Linear(WIDTH, WIDTH)
-        self.residue_numeric_gate = nn.Parameter(torch.zeros(()))
-        self.modulus_numeric_gate = nn.Parameter(torch.zeros(()))
-        self.pair_memory = nn.Embedding(
-            PAIR_MEMORY_SIZE,
+        self.modulus_pair_memory = nn.Embedding(
+            MAX_VALUE,
             PAIR_MEMORY_WIDTH,
         )
+        self.residue_pair_memory = nn.Embedding(
+            RESIDUE_CODES,
+            PAIR_MEMORY_WIDTH,
+        )
+        self.memory_norm = RMSNorm(PAIR_MEMORY_WIDTH)
         self.memory_projection = nn.Linear(
             PAIR_MEMORY_WIDTH,
             WIDTH,
@@ -176,13 +142,11 @@ class CanonicalResidueModel(nn.Module):
         modulus_index = modulus.clamp(max=MAX_VALUE - 1)
         residue_index = residue.clamp(max=MAX_VALUE - 1)
         modulus_vector = self.modulus_norm(
-            self.modulus_embedding(modulus_index)
-            + torch.tanh(self.modulus_numeric_gate)
-            * self.modulus_decimal_projection(
-                self.decimal_branch(modulus_index),
-            ),
+            self.modulus_embedding(modulus_index),
         )
-        initial_state = self._residue_code(residue_index)
+        initial_state = self.residue_norm(
+            self.residue_embedding(residue_index),
+        )
         reconstruction_loss = self._reconstruction_loss(
             initial_state,
             input_ids,
@@ -272,10 +236,15 @@ class CanonicalResidueModel(nn.Module):
         residues = residue_indices % modulus
         reflected = (modulus - residues) % modulus
         representatives = torch.minimum(residues, reflected)
-        keys = (
-            modulus * RESIDUE_CODES + representatives
-        ) % PAIR_MEMORY_SIZE
-        memories = self.pair_memory(keys)
+        modulus_memories = self.modulus_pair_memory(
+            modulus.clamp(max=MAX_VALUE - 1),
+        )
+        residue_memories = self.residue_pair_memory(
+            representatives % RESIDUE_CODES,
+        )
+        memories = self.memory_norm(
+            modulus_memories * residue_memories,
+        )
         memory = (
             memories * residue_weights.to(memories.dtype)[..., None]
         ).sum(dim=1)
@@ -293,7 +262,9 @@ class CanonicalResidueModel(nn.Module):
         reflected = ((modulus - residues) % modulus).clamp(
             max=MAX_VALUE - 1,
         )
-        reflected_codes = self._residue_code(reflected)
+        reflected_codes = self.residue_norm(
+            self.residue_embedding(reflected),
+        )
         reflected_state = (
             reflected_codes
             * residue_weights.to(reflected_codes.dtype)[..., None]
@@ -310,7 +281,9 @@ class CanonicalResidueModel(nn.Module):
             device=query.device,
         )
         codes = F.normalize(
-            self._residue_code(code_values),
+            self.residue_norm(
+                self.residue_embedding(code_values),
+            ),
             dim=-1,
         )
         scale = self.code_log_scale.exp().clamp(max=30.0)
@@ -320,13 +293,6 @@ class CanonicalResidueModel(nn.Module):
             dim=-1,
         )
         return self.residue_norm(state), entropy, probabilities
-
-    def _residue_code(self, value: Tensor) -> Tensor:
-        return self.residue_norm(
-            self.residue_embedding(value)
-            + torch.tanh(self.residue_numeric_gate)
-            * self.decimal_branch(value),
-        )
 
     def _decode_sequence(
         self,
