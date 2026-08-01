@@ -1,4 +1,4 @@
-"""Semantic paired-step factor automaton for One Layer Deeper."""
+"""Dual-factor semigroup-block automaton for One Layer Deeper."""
 
 from __future__ import annotations
 
@@ -195,15 +195,24 @@ class CanonicalResidueModel(nn.Module):
         state_weights[:, 0] = 1.0
         entropy_sum = state.new_zeros(state.shape[0])
         active_steps = state.new_zeros(state.shape[0])
-        single_first = time_steps.remainder(2).to(dtype=torch.bool)
-        macro_steps = time_steps // 2 + single_first.long()
+        three_step_blocks = time_steps.remainder(3) == 0
+        single_first = (~three_step_blocks) & (time_steps.remainder(2) == 1)
+        macro_steps = torch.where(
+            three_step_blocks,
+            2 * (time_steps // 3),
+            time_steps // 2 + single_first.long(),
+        )
         maximum_steps = (
             MAX_TRAIN_MACRO_STEPS
             if self.training
             else MAX_EVAL_MACRO_STEPS
         )
         for step in range(maximum_steps):
-            use_single = single_first & (step == 0)
+            use_single = torch.where(
+                three_step_blocks,
+                torch.full_like(three_step_blocks, step % 2 == 0),
+                single_first & (step == 0),
+            )
             transition_state = (
                 self._factor_fiber_state(
                     modulus_index,
@@ -245,12 +254,21 @@ class CanonicalResidueModel(nn.Module):
                 use_single,
             )
             if step == 0:
-                first_coordinate_logits = coordinate_logits
                 first_coordinate_factors = coordinate_factors
-                candidate_factor_logits = self._candidate_factor_logits(
-                    residue,
-                    use_single,
-                )
+                if self.training:
+                    first_coordinate_logits = self._direct_coordinate_logits(
+                        residue,
+                        coordinate_factors,
+                        time_steps,
+                    )
+                    candidate_factor_logits = self._candidate_factor_logits(
+                        modulus_index,
+                        residue,
+                        use_single,
+                    )
+                else:
+                    first_coordinate_logits = coordinate_logits
+                    candidate_factor_logits = coordinate_logits[:, None]
             candidate_weights, candidate_indices = probabilities.topk(
                 MEMORY_TOP_K,
                 dim=-1,
@@ -302,6 +320,7 @@ class CanonicalResidueModel(nn.Module):
 
     def _candidate_factor_logits(
         self,
+        modulus: Tensor,
         residue: Tensor,
         use_single: Tensor,
     ) -> Tensor:
@@ -309,19 +328,93 @@ class CanonicalResidueModel(nn.Module):
             MIN_CANDIDATE_FACTOR,
             MAX_CANDIDATE_FACTOR + 1,
             device=residue.device,
-        )[None, :]
-        factor_residues = residue[:, None] % factors
+        )[None, :, None].expand(residue.shape[0], -1, -1)
+        partners = torch.div(
+            modulus[:, None, None] + factors // 2,
+            factors,
+            rounding_mode="floor",
+        ).clamp(min=2, max=MAX_VALUE - 1)
+        factor_pairs = torch.cat((factors, partners), dim=-1)
+        return self._coordinate_transition_logits(
+            residue,
+            factor_pairs,
+            use_single,
+        )
+
+    def _coordinate_transition_logits(
+        self,
+        residue: Tensor,
+        factors: Tensor,
+        use_single: Tensor,
+    ) -> Tensor:
+        residue_shape = (residue.shape[0],) + (1,) * (factors.ndim - 1)
+        factor_residues = residue.reshape(residue_shape) % factors
         input_coordinates = torch.minimum(
             factor_residues,
             (factors - factor_residues) % factors,
         )
-        keys = factors * COORDINATE_CLASSES + input_coordinates
+        keys = (
+            factors.clamp(max=MAX_CANDIDATE_FACTOR)
+            * COORDINATE_CLASSES
+            + input_coordinates % COORDINATE_CLASSES
+        )
         single_logits = self.coordinate_transition(keys)
         paired_logits = self.paired_coordinate_transition(keys)
+        condition_shape = (use_single.shape[0],) + (1,) * factors.ndim
         return torch.where(
-            use_single[:, None, None],
+            use_single.reshape(condition_shape),
             single_logits,
             paired_logits,
+        )
+
+    def _direct_coordinate_logits(
+        self,
+        residue: Tensor,
+        factors: Tensor,
+        time_steps: Tensor,
+    ) -> Tensor:
+        single_logits = self._coordinate_transition_logits(
+            residue,
+            factors,
+            torch.ones_like(time_steps, dtype=torch.bool),
+        )
+        paired_logits = self._coordinate_transition_logits(
+            residue,
+            factors,
+            torch.zeros_like(time_steps, dtype=torch.bool),
+        )
+        values = torch.arange(
+            COORDINATE_CLASSES,
+            device=residue.device,
+        )[None, None, :]
+        valid_values = values < factors[..., None]
+        single_probabilities = F.softmax(
+            single_logits.float().masked_fill(~valid_values, -1e9),
+            dim=-1,
+        )
+        intermediate_residues = values % factors[..., None]
+        intermediate_coordinates = torch.minimum(
+            intermediate_residues,
+            (factors[..., None] - intermediate_residues)
+            % factors[..., None],
+        )
+        paired_keys = (
+            factors[..., None].clamp(max=MAX_CANDIDATE_FACTOR)
+            * COORDINATE_CLASSES
+            + intermediate_coordinates % COORDINATE_CLASSES
+        )
+        paired_bank = self.paired_coordinate_transition(paired_keys).float()
+        composed_logits = (
+            single_probabilities[..., None] * paired_bank
+        ).sum(dim=-2)
+        return torch.where(
+            (time_steps == 1)[:, None, None],
+            single_logits,
+            torch.where(
+                (time_steps == 2)[:, None, None],
+                paired_logits,
+                composed_logits,
+            ),
         )
 
     def _memory_context(
@@ -799,6 +892,7 @@ def _factor_collision_loss(
 def _factor_consistency_loss(
     candidate_factor_logits: Tensor,
     factor_probabilities: Tensor,
+    modulus: Tensor,
     target_residues: Tensor,
     direct_rows: Tensor,
 ) -> Tensor:
@@ -810,8 +904,16 @@ def _factor_consistency_loss(
         MIN_CANDIDATE_FACTOR,
         MAX_CANDIDATE_FACTOR + 1,
         device=target_residues.device,
-    )[None, :]
-    targets = target_residues[selected, None] % factors
+    )[None, :, None].expand(selected.numel(), -1, -1)
+    partners = torch.div(
+        modulus[selected, None, None] + factors // 2,
+        factors,
+        rounding_mode="floor",
+    ).clamp(min=2, max=MAX_VALUE - 1)
+    factor_pairs = torch.cat((factors, partners), dim=-1)
+    targets = (
+        target_residues[selected, None, None] % factor_pairs
+    ) % COORDINATE_CLASSES
     log_probabilities = F.log_softmax(
         candidate_factor_logits[selected].float(),
         dim=-1,
@@ -819,7 +921,7 @@ def _factor_consistency_loss(
     target_log_probabilities = log_probabilities.gather(
         -1,
         targets[..., None],
-    ).squeeze(-1)
+    ).squeeze(-1).sum(dim=-1)
     routing_log_probabilities = factor_probabilities[selected].float().clamp_min(
         1e-8,
     ).log()
@@ -867,9 +969,9 @@ def training_loss(logits: Tensor, labels: Tensor, auxiliary: object) -> Tensor:
         raise TypeError("coordinate factors must be a rank-2 tensor")
     if (
         not isinstance(candidate_factor_logits, Tensor)
-        or candidate_factor_logits.ndim != 3
+        or candidate_factor_logits.ndim != 4
     ):
-        raise TypeError("candidate factor logits must be a rank-3 tensor")
+        raise TypeError("candidate factor logits must be a rank-4 tensor")
 
     row_indices = (
         ROW_MARKER_BASE - logits[:, PAD_TOKEN_ID]
@@ -918,7 +1020,7 @@ def training_loss(logits: Tensor, labels: Tensor, auxiliary: object) -> Tensor:
         target_residues,
         valid_rows,
     )
-    coordinate_rows = valid_rows & (time_steps <= 2)
+    coordinate_rows = valid_rows & (time_steps <= 3)
     selected_coordinate_rows = coordinate_rows.nonzero(
         as_tuple=False,
     ).flatten()
@@ -939,8 +1041,9 @@ def training_loss(logits: Tensor, labels: Tensor, auxiliary: object) -> Tensor:
     factor_consistency_loss = _factor_consistency_loss(
         candidate_factor_logits,
         factor_probabilities,
+        modulus,
         target_residues,
-        coordinate_rows,
+        valid_rows & (time_steps <= 2),
     )
     factor_entropy = -(
         factor_probabilities.float()
