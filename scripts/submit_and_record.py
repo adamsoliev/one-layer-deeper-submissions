@@ -71,7 +71,9 @@ def require_committed_worktree() -> str:
     return commit_hash
 
 
-def parse_output(output: str, requested_tier: str, dataset_id: str | None) -> ParsedResult:
+def parse_output(
+    output: str, requested_tier: str, dataset_id: str | None
+) -> ParsedResult:
     result = ParsedResult(tier=requested_tier, dataset_id=dataset_id)
     for line in output.splitlines():
         valid_match = re.match(r"^valid:\s+.+\s+\((\d+) bytes\)$", line)
@@ -244,7 +246,9 @@ def markdown_escape(value: str) -> str:
     return value.replace("|", r"\|").replace("\n", " ")
 
 
-def score_cell(status: str | None, score_pct: float | None, view_url: str | None) -> str:
+def score_cell(
+    status: str | None, score_pct: float | None, view_url: str | None
+) -> str:
     if status is None:
         return "—"
     if score_pct is None:
@@ -255,8 +259,8 @@ def score_cell(status: str | None, score_pct: float | None, view_url: str | None
 
 def results_table(rows: list[tuple]) -> list[str]:
     table = [
-        "| Attempt | Architecture | Source | E1 | E3 | E5 |",
-        "| ---: | --- | --- | ---: | ---: | ---: |",
+        "| Attempt | Architecture | Source | E1 | E3 | E4 | E5 |",
+        "| ---: | --- | --- | ---: | ---: | ---: | ---: |",
     ]
     for (
         attempt,
@@ -268,19 +272,21 @@ def results_table(rows: list[tuple]) -> list[str]:
         e3_status,
         e3_score_pct,
         e3_view_url,
+        e4_status,
+        e4_score_pct,
+        e4_view_url,
         e5_status,
         e5_score_pct,
         e5_view_url,
     ) in rows:
-        commit = (
-            f"[`{source_commit[:7]}`]({REPOSITORY_URL}/commit/{source_commit})"
-        )
+        commit = f"[`{source_commit[:7]}`]({REPOSITORY_URL}/commit/{source_commit})"
         e1_score = score_cell(e1_status, e1_score_pct, e1_view_url)
         e3_score = score_cell(e3_status, e3_score_pct, e3_view_url)
+        e4_score = score_cell(e4_status, e4_score_pct, e4_view_url)
         e5_score = score_cell(e5_status, e5_score_pct, e5_view_url)
         table.append(
             f"| {attempt} | {markdown_escape(architecture_label)} | {commit} | "
-            f"{e1_score} | {e3_score} | {e5_score} |"
+            f"{e1_score} | {e3_score} | {e4_score} | {e5_score} |"
         )
     return table
 
@@ -299,6 +305,9 @@ def refresh_readme() -> None:
                 e3_status,
                 e3_score_pct,
                 e3_view_url,
+                e4_status,
+                e4_score_pct,
+                e4_view_url,
                 e5_status,
                 e5_score_pct,
                 e5_view_url

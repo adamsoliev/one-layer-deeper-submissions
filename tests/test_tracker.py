@@ -76,6 +76,32 @@ class ScoreCellTests(unittest.TestCase):
             "[7.83%](https://example.com/result)",
         )
 
+    def test_results_table_includes_e4(self) -> None:
+        rows = [
+            (
+                49,
+                "Range-independent refinement",
+                "9169afaf59102aef7855cd3cb2b3f160af00b9a7",
+                "succeeded",
+                9.5,
+                None,
+                "succeeded",
+                1.44,
+                None,
+                "succeeded",
+                0.32,
+                None,
+                "succeeded",
+                1.79,
+                None,
+            )
+        ]
+
+        table = TRACKER.results_table(rows)
+
+        self.assertIn("| E1 | E3 | E4 | E5 |", table[0])
+        self.assertIn("| 9.50% | 1.44% | 0.32% | 1.79% |", table[2])
+
 
 if __name__ == "__main__":
     unittest.main()

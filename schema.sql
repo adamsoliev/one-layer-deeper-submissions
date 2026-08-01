@@ -53,7 +53,8 @@ INSERT INTO architectures VALUES
     ('hard-factor-routing', 'Hard-routed factor-table recurrence', 'aaf91b3b8805eeff213994671ce32aacbe9d1703', 45),
     ('paired-factor-automaton', 'Paired-step factor-coordinate automaton', 'debf63ca018d8fd3fb9c0ea5eb5a9007b296c799', 46),
     ('semantic-paired-automaton', 'Semantic paired-step factor automaton', '50be6d72eb3c9981d0e7f6baeadc4f38629a11fb', 47),
-    ('dual-factor-block', 'Dual-factor semigroup-block automaton', '876db266b0117a2642b985d34e4a1884dd66a541', 48)
+    ('dual-factor-block', 'Dual-factor semigroup-block automaton', '876db266b0117a2642b985d34e4a1884dd66a541', 48),
+    ('range-independent-refinement', 'Range-independent digit-compositional refinement', '9169afaf59102aef7855cd3cb2b3f160af00b9a7', 49)
 ON CONFLICT (architecture_key) DO UPDATE SET
     architecture_label = excluded.architecture_label,
     source_commit = excluded.source_commit,
@@ -133,7 +134,7 @@ WITH ranked AS (
             ORDER BY number DESC
         ) AS dataset_rank
     FROM submissions
-    WHERE dataset_id IN ('e1', 'e3', 'e5')
+    WHERE dataset_id IN ('e1', 'e3', 'e4', 'e5')
 )
 SELECT
     architectures.display_order,
@@ -146,6 +147,9 @@ SELECT
     e3.status AS e3_status,
     e3.score_pct AS e3_score_pct,
     e3.view_url AS e3_view_url,
+    e4.status AS e4_status,
+    e4.score_pct AS e4_score_pct,
+    e4.view_url AS e4_view_url,
     e5.status AS e5_status,
     e5.score_pct AS e5_score_pct,
     e5.view_url AS e5_view_url
@@ -158,6 +162,10 @@ LEFT JOIN ranked AS e3
     ON architectures.architecture_key = e3.architecture_key
     AND e3.dataset_id = 'e3'
     AND e3.dataset_rank = 1
+LEFT JOIN ranked AS e4
+    ON architectures.architecture_key = e4.architecture_key
+    AND e4.dataset_id = 'e4'
+    AND e4.dataset_rank = 1
 LEFT JOIN ranked AS e5
     ON architectures.architecture_key = e5.architecture_key
     AND e5.dataset_id = 'e5'
