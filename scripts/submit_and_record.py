@@ -291,6 +291,36 @@ def results_table(rows: list[tuple]) -> list[str]:
     return table
 
 
+def grouped_results_tables(rows: list[tuple]) -> list[str]:
+    groups = (
+        (
+            "Show generic naive sequence architectures (1-15)",
+            [row for row in rows if row[0] <= 15],
+        ),
+        (
+            "Show end-to-end learned, with bounded, task-specific state spaces (16-48)",
+            [row for row in rows if 16 <= row[0] <= 48],
+        ),
+    )
+    table: list[str] = []
+    for summary, group_rows in groups:
+        if not group_rows:
+            continue
+        table.extend(
+            [
+                "<details>",
+                f"<summary>{summary}</summary>",
+                "",
+                *results_table(group_rows),
+                "",
+                "</details>",
+                "",
+            ]
+        )
+    table.extend(results_table([row for row in rows if row[0] >= 49]))
+    return table
+
+
 def refresh_readme() -> None:
     with duckdb.connect(str(DATABASE_PATH), read_only=True) as connection:
         rows = connection.execute(
@@ -316,25 +346,7 @@ def refresh_readme() -> None:
             """
         ).fetchall()
 
-    split_at = len(rows) // 2
-    earlier_rows = rows[:split_at]
-    recent_rows = rows[split_at:]
-    table: list[str] = []
-    if earlier_rows:
-        first_attempt = earlier_rows[0][0]
-        last_attempt = earlier_rows[-1][0]
-        table.extend(
-            [
-                "<details>",
-                f"<summary>Show earlier attempts ({first_attempt}–{last_attempt})</summary>",
-                "",
-                *results_table(earlier_rows),
-                "",
-                "</details>",
-                "",
-            ]
-        )
-    table.extend(results_table(recent_rows))
+    table = grouped_results_tables(rows)
 
     readme = README_PATH.read_text(encoding="utf-8")
     before, separator, remainder = readme.partition(TABLE_START)

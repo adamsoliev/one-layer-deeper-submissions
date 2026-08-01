@@ -165,7 +165,7 @@ uv run python -c "import duckdb; duckdb.connect('submissions.duckdb').sql('FROM 
 
 <!-- SUBMISSIONS_TABLE_START -->
 <details>
-<summary>Show earlier attempts (1–24)</summary>
+<summary>Show generic naive sequence architectures (1-15)</summary>
 
 | Attempt | Architecture | Source | E1 | E3 | E4 | E5 |
 | ---: | --- | --- | ---: | ---: | ---: | ---: |
@@ -184,6 +184,14 @@ uv run python -c "import duckdb; duckdb.connect('submissions.duckdb').sql('FROM 
 | 13 | 64-expert width-98 tied MoE (5M) | [`73e3eb5`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/73e3eb5e57fe667ad3bfd141a1aa4e5145df1f5c) | [8.00%](https://onelayerdeeper.ai/submissions/5a3b7563-cb32-4840-abd9-00723ea86244) | — | — | [1.00%](https://onelayerdeeper.ai/submissions/17841105-468c-4725-9f58-cd6a990581dc) |
 | 14 | Multiplicative numeric recurrence | [`394f4fc`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/394f4fc429b06488a75422c474aeb63e5c512aec) | [4.00%](https://onelayerdeeper.ai/submissions/d143e134-89ca-4d01-91d4-1305dabe5158) | — | — | [0.25%](https://onelayerdeeper.ai/submissions/03b77fe0-6aa1-45bf-bf6e-b1d4ec275b13) |
 | 15 | Shallow joint-answer bottleneck | [`a644db3`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/a644db33cbf7157343bac299437a5e19dcea997f) | [8.67%](https://onelayerdeeper.ai/submissions/bc0b6ee8-fecb-4438-a730-c075c24c7294) | — | — | [1.71%](https://onelayerdeeper.ai/submissions/c58bc912-b41c-4a9f-846a-c34807f3973d) |
+
+</details>
+
+<details>
+<summary>Show end-to-end learned, with bounded, task-specific state spaces (16-48)</summary>
+
+| Attempt | Architecture | Source | E1 | E3 | E4 | E5 |
+| ---: | --- | --- | ---: | ---: | ---: | ---: |
 | 16 | Canonical-state squaring recurrence | [`88ca989`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/88ca9897e9d7a0698a1dffc42c636fa7896d8f28) | [86.00%](https://onelayerdeeper.ai/submissions/f154a3fc-53e8-4110-b298-6c444ea360fa) | — | — | [6.88%](https://onelayerdeeper.ai/submissions/b91b2b1d-d37c-4960-ba80-14a8b1c4dad9) |
 | 17 | Associative-memory residue recurrence | [`6145506`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/6145506bcc830c906d11d0f4975988e98e4e399a) | [87.33%](https://onelayerdeeper.ai/submissions/c42e160b-3266-41c4-a73b-69ea3ab959e4) | — | — | [7.67%](https://onelayerdeeper.ai/submissions/486a97a4-6c26-40d7-837d-6ce834fe34ad) |
 | 18 | Digit-compositional residue recurrence | [`d522f3d`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/d522f3dd6f2181a4545ec98464737ebfcbc016f2) | [79.83%](https://onelayerdeeper.ai/submissions/a4522c91-04a0-47cd-a372-3d5dabd1b125) | — | — | [2.75%](https://onelayerdeeper.ai/submissions/4b6fcb76-04da-4c1c-8cf3-bede193fe832) |
@@ -193,11 +201,6 @@ uv run python -c "import duckdb; duckdb.connect('submissions.duckdb').sql('FROM 
 | 22 | Modulus-masked residue recurrence | [`25744ff`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/25744ff5a5c41416dc6012ef678756730d2ae617) | [88.83%](https://onelayerdeeper.ai/submissions/a4f6f5e2-36fb-47a0-a607-5f758a93b8f4) | — | — | [5.92%](https://onelayerdeeper.ai/submissions/fb07a956-4a4c-4a65-9ed5-c11a63cb241f) |
 | 23 | Stochastic-memory residue recurrence | [`f4d84f5`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/f4d84f52f800123a14237646db619e7b6fffc3bc) | [83.83%](https://onelayerdeeper.ai/submissions/4435957f-8df7-43ad-a8a4-0ef6e145ea8d) | — | — | [5.79%](https://onelayerdeeper.ai/submissions/96268ffa-3d3e-4fa0-8d9e-52d3156d39e7) |
 | 24 | Reflection-invariant residue recurrence | [`2cd612c`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/2cd612c3916df3dcaf2d2ee703f1558e14508377) | [94.17%](https://onelayerdeeper.ai/submissions/7d42ffc2-be3c-4703-ba6d-dbc6dec490ef) | — | — | [19.83%](https://onelayerdeeper.ai/submissions/9dd9fae6-0b79-4680-ac68-6f763903ec7d) |
-
-</details>
-
-| Attempt | Architecture | Source | E1 | E3 | E4 | E5 |
-| ---: | --- | --- | ---: | ---: | ---: | ---: |
 | 25 | Residue-anchored reflection recurrence | [`def8986`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/def8986c5cb7f4af046ce1d1e7e67091208c29ef) | [87.83%](https://onelayerdeeper.ai/submissions/947dd7d7-b89a-42cc-b761-e18beb1c8901) | — | — | [13.83%](https://onelayerdeeper.ai/submissions/a641d573-b964-4ca3-897b-098cfc1816ce) |
 | 26 | Semigroup-jump residue recurrence | [`ce388f4`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/ce388f4ca0988894d5dfc4f15946a1dc6101b44f) | [81.67%](https://onelayerdeeper.ai/submissions/ba5bd48a-2593-4665-bad1-11a8aad7c2f5) | — | — | [8.42%](https://onelayerdeeper.ai/submissions/03c6467e-f704-4903-8336-33d81d3347e6) |
 | 27 | Periodic-factor residue recurrence | [`8a640a0`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/8a640a007693e39e561a6877f67f9b2ab5ed0a5c) | [96.33%](https://onelayerdeeper.ai/submissions/25a927b5-32d0-4424-9c19-dfea8dd6f0db) | — | — | [13.38%](https://onelayerdeeper.ai/submissions/9e846898-43a1-4ca1-9a88-1715872d8f6b) |
@@ -222,5 +225,10 @@ uv run python -c "import duckdb; duckdb.connect('submissions.duckdb').sql('FROM 
 | 46 | Paired-step factor-coordinate automaton | [`debf63c`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/debf63ca018d8fd3fb9c0ea5eb5a9007b296c799) | — | [97.38%](https://onelayerdeeper.ai/submissions/bb3dae11-4365-4b38-af3a-f49d361cbe9a) | — | [94.75%](https://onelayerdeeper.ai/submissions/0b413cdc-538a-4413-8700-1a22157c2965) |
 | 47 | Semantic paired-step factor automaton | [`50be6d7`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/50be6d72eb3c9981d0e7f6baeadc4f38629a11fb) | — | [100.00%](https://onelayerdeeper.ai/submissions/d7b2e810-b324-4d95-ab3f-4ace49bf16d9) | — | [96.00%](https://onelayerdeeper.ai/submissions/d21e1184-c423-4cbf-b763-e5ac70c889df) |
 | 48 | Dual-factor semigroup-block automaton | [`876db26`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/876db266b0117a2642b985d34e4a1884dd66a541) | — | [100.00%](https://onelayerdeeper.ai/submissions/35b37a27-3147-4aec-b283-6528a942dd5a) | — | [100.00%](https://onelayerdeeper.ai/submissions/760ce171-797d-49d0-9baa-de931de4c2ca) |
+
+</details>
+
+| Attempt | Architecture | Source | E1 | E3 | E4 | E5 |
+| ---: | --- | --- | ---: | ---: | ---: | ---: |
 | 49 | Range-independent digit-compositional refinement | [`9169afa`](https://github.com/adamsoliev/one-layer-deeper-submissions/commit/9169afaf59102aef7855cd3cb2b3f160af00b9a7) | [9.50%](https://onelayerdeeper.ai/submissions/d05aaad4-e7d3-4cf5-a98c-57bde66d6f54) | [1.44%](https://onelayerdeeper.ai/submissions/d346d44e-ebea-490d-af08-ebb4fae80822) | [0.32%](https://onelayerdeeper.ai/submissions/91628002-54b6-4346-8bd1-599124258075) | [1.79%](https://onelayerdeeper.ai/submissions/5252bdf9-8080-464a-a719-1839686f06c5) |
 <!-- SUBMISSIONS_TABLE_END -->

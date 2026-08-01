@@ -102,6 +102,40 @@ class ScoreCellTests(unittest.TestCase):
         self.assertIn("| E1 | E3 | E4 | E5 |", table[0])
         self.assertIn("| 9.50% | 1.44% | 0.32% | 1.79% |", table[2])
 
+    def test_groups_architectures_by_model_family(self) -> None:
+        def row(number: int) -> tuple:
+            return (
+                number,
+                f"Architecture {number}",
+                "9169afaf59102aef7855cd3cb2b3f160af00b9a7",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+
+        rendered = "\n".join(
+            TRACKER.grouped_results_tables([row(1), row(15), row(16), row(48), row(49)])
+        )
+
+        self.assertIn(
+            "<summary>Show generic naive sequence architectures (1-15)</summary>",
+            rendered,
+        )
+        self.assertIn(
+            "<summary>Show end-to-end learned, with bounded, task-specific state spaces (16-48)</summary>",
+            rendered,
+        )
+        self.assertEqual(rendered.count("Architecture 49"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
