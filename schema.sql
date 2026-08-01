@@ -52,7 +52,8 @@ INSERT INTO architectures VALUES
     ('factor-coordinate-table', 'Factor-coordinate table co-root recurrence', 'd52cc3d4b52cb1ebebd7850449d8b01cf391adc9', 44),
     ('hard-factor-routing', 'Hard-routed factor-table recurrence', 'aaf91b3b8805eeff213994671ce32aacbe9d1703', 45),
     ('paired-factor-automaton', 'Paired-step factor-coordinate automaton', 'debf63ca018d8fd3fb9c0ea5eb5a9007b296c799', 46),
-    ('semantic-paired-automaton', 'Semantic paired-step factor automaton', '50be6d72eb3c9981d0e7f6baeadc4f38629a11fb', 47)
+    ('semantic-paired-automaton', 'Semantic paired-step factor automaton', '50be6d72eb3c9981d0e7f6baeadc4f38629a11fb', 47),
+    ('dual-factor-block', 'Dual-factor semigroup-block automaton', '876db266b0117a2642b985d34e4a1884dd66a541', 48)
 ON CONFLICT (architecture_key) DO UPDATE SET
     architecture_label = excluded.architecture_label,
     source_commit = excluded.source_commit,
