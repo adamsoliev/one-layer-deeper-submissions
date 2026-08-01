@@ -1,4 +1,4 @@
-"""Paired-step factor-coordinate automaton for One Layer Deeper."""
+"""Semantic paired-step factor automaton for One Layer Deeper."""
 
 from __future__ import annotations
 
@@ -130,9 +130,9 @@ class CanonicalResidueModel(nn.Module):
             COORDINATE_CLASSES,
         )
         self.code_log_scale = nn.Parameter(torch.tensor(math.log(10.0)))
-        self.answer_decoder = nn.Linear(
-            WIDTH,
-            MAX_OUTPUT_DIGITS * spec.vocab_size,
+        self.decimal_decoder = nn.Embedding(
+            MAX_OUTPUT_DIGITS * NUM_DIGITS,
+            spec.vocab_size,
         )
         self.apply(self._initialize)
         nn.init.normal_(self.transition.query.weight, mean=0.0, std=0.01)
@@ -174,7 +174,7 @@ class CanonicalResidueModel(nn.Module):
             self.residue_embedding(residue_index),
         )
         reconstruction_loss = self._reconstruction_loss(
-            initial_state,
+            residue_index,
             input_ids,
             attention_mask,
         )
@@ -282,7 +282,11 @@ class CanonicalResidueModel(nn.Module):
         code_entropy = (
             entropy_sum / active_steps.clamp_min(1.0)
         ).mean() / math.log(RESIDUE_CODES)
-        logits = self._decode_sequence(state, input_ids, attention_mask)
+        logits = self._decode_sequence(
+            state_probabilities,
+            input_ids,
+            attention_mask,
+        )
         return logits, (
             reconstruction_loss,
             code_entropy,
@@ -541,14 +545,19 @@ class CanonicalResidueModel(nn.Module):
 
     def _decode_sequence(
         self,
-        state: Tensor,
+        state_probabilities: Tensor,
         input_ids: Tensor,
         attention_mask: Tensor,
     ) -> Tensor:
-        digit_logits = self.answer_decoder(state).view(
-            input_ids.shape[0],
-            MAX_OUTPUT_DIGITS,
-            self.config.vocab_size,
+        code_values = torch.arange(
+            RESIDUE_CODES,
+            device=input_ids.device,
+        )
+        value_logits = self._value_digit_logits(code_values)
+        digit_logits = torch.einsum(
+            "br,rpv->bpv",
+            state_probabilities.to(value_logits.dtype),
+            value_logits,
         )
         length = input_ids.shape[1]
         positions = torch.arange(length, device=input_ids.device)[None, :]
@@ -575,7 +584,7 @@ class CanonicalResidueModel(nn.Module):
 
     def _reconstruction_loss(
         self,
-        initial_state: Tensor,
+        initial_value: Tensor,
         input_ids: Tensor,
         attention_mask: Tensor,
     ) -> Tensor:
@@ -596,11 +605,7 @@ class CanonicalResidueModel(nn.Module):
             )
             - 1
         ).clamp(min=0, max=MAX_OUTPUT_DIGITS - 1)
-        digit_logits = self.answer_decoder(initial_state).view(
-            input_ids.shape[0],
-            MAX_OUTPUT_DIGITS,
-            self.config.vocab_size,
-        )
+        digit_logits = self._value_digit_logits(initial_value)
         batch_indices = torch.arange(
             input_ids.shape[0],
             device=input_ids.device,
@@ -610,6 +615,20 @@ class CanonicalResidueModel(nn.Module):
             reconstruction_logits[x_mask].float(),
             input_ids[x_mask],
         )
+
+    def _value_digit_logits(self, value: Tensor) -> Tensor:
+        powers = torch.tensor(
+            (1, 10, 100, 1_000),
+            device=value.device,
+            dtype=value.dtype,
+        )
+        digits = (value[..., None] // powers) % NUM_DIGITS
+        significance = torch.arange(
+            MAX_OUTPUT_DIGITS,
+            device=value.device,
+        )
+        keys = significance * NUM_DIGITS + digits
+        return self.decimal_decoder(keys)
 
     @staticmethod
     def _parse_fields(
@@ -667,6 +686,7 @@ def build_optimizer(
         model.factor_selector.weight,
         model.coordinate_transition.weight,
         model.paired_coordinate_transition.weight,
+        model.decimal_decoder.weight,
     ]
     table_parameter_ids = {id(parameter) for parameter in table_parameters}
     base_parameters = [
