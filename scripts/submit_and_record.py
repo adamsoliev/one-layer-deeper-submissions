@@ -298,7 +298,7 @@ def grouped_results_tables(rows: list[tuple]) -> list[str]:
             [row for row in rows if row[0] <= 15],
         ),
         (
-            "Show end-to-end learned, with bounded, task-specific state spaces (16-48)",
+            "Show end-to-end architectures with bounded, task-specific state spaces (16–48)",
             [row for row in rows if 16 <= row[0] <= 48],
         ),
     )

@@ -131,7 +131,7 @@ class ScoreCellTests(unittest.TestCase):
             rendered,
         )
         self.assertIn(
-            "<summary>Show end-to-end learned, with bounded, task-specific state spaces (16-48)</summary>",
+            "<summary>Show end-to-end architectures with bounded, task-specific state spaces (16–48)</summary>",
             rendered,
         )
         self.assertEqual(rendered.count("Architecture 49"), 1)
