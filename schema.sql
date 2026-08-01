@@ -130,7 +130,7 @@ WITH ranked AS (
             ORDER BY number DESC
         ) AS dataset_rank
     FROM submissions
-    WHERE dataset_id IN ('e1', 'e5')
+    WHERE dataset_id IN ('e1', 'e3', 'e5')
 )
 SELECT
     architectures.display_order,
@@ -140,6 +140,9 @@ SELECT
     e1.status AS e1_status,
     e1.score_pct AS e1_score_pct,
     e1.view_url AS e1_view_url,
+    e3.status AS e3_status,
+    e3.score_pct AS e3_score_pct,
+    e3.view_url AS e3_view_url,
     e5.status AS e5_status,
     e5.score_pct AS e5_score_pct,
     e5.view_url AS e5_view_url
@@ -148,6 +151,10 @@ LEFT JOIN ranked AS e1
     ON architectures.architecture_key = e1.architecture_key
     AND e1.dataset_id = 'e1'
     AND e1.dataset_rank = 1
+LEFT JOIN ranked AS e3
+    ON architectures.architecture_key = e3.architecture_key
+    AND e3.dataset_id = 'e3'
+    AND e3.dataset_rank = 1
 LEFT JOIN ranked AS e5
     ON architectures.architecture_key = e5.architecture_key
     AND e5.dataset_id = 'e5'

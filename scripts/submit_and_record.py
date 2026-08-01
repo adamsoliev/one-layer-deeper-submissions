@@ -134,7 +134,10 @@ def parse_output(output: str, requested_tier: str, dataset_id: str | None) -> Pa
     return result
 
 
-def submit(args: argparse.Namespace) -> tuple[str, int, str]:
+def submit(
+    args: argparse.Namespace,
+    dataset_id: str | None,
+) -> tuple[str, int, str]:
     command = [
         "one-layer",
         "submit",
@@ -143,8 +146,8 @@ def submit(args: argparse.Namespace) -> tuple[str, int, str]:
         args.tier,
         "--wait",
     ]
-    if args.dataset:
-        command.extend(["--dataset", args.dataset])
+    if dataset_id:
+        command.extend(["--dataset", dataset_id])
     if args.server:
         command.extend(["--server", args.server])
 
@@ -252,8 +255,8 @@ def score_cell(status: str | None, score_pct: float | None, view_url: str | None
 
 def results_table(rows: list[tuple]) -> list[str]:
     table = [
-        "| Attempt | Architecture | Source | E1 | E5 |",
-        "| ---: | --- | --- | ---: | ---: |",
+        "| Attempt | Architecture | Source | E1 | E3 | E5 |",
+        "| ---: | --- | --- | ---: | ---: | ---: |",
     ]
     for (
         attempt,
@@ -262,6 +265,9 @@ def results_table(rows: list[tuple]) -> list[str]:
         e1_status,
         e1_score_pct,
         e1_view_url,
+        e3_status,
+        e3_score_pct,
+        e3_view_url,
         e5_status,
         e5_score_pct,
         e5_view_url,
@@ -270,10 +276,11 @@ def results_table(rows: list[tuple]) -> list[str]:
             f"[`{source_commit[:7]}`]({REPOSITORY_URL}/commit/{source_commit})"
         )
         e1_score = score_cell(e1_status, e1_score_pct, e1_view_url)
+        e3_score = score_cell(e3_status, e3_score_pct, e3_view_url)
         e5_score = score_cell(e5_status, e5_score_pct, e5_view_url)
         table.append(
             f"| {attempt} | {markdown_escape(architecture_label)} | {commit} | "
-            f"{e1_score} | {e5_score} |"
+            f"{e1_score} | {e3_score} | {e5_score} |"
         )
     return table
 
@@ -289,6 +296,9 @@ def refresh_readme() -> None:
                 e1_status,
                 e1_score_pct,
                 e1_view_url,
+                e3_status,
+                e3_score_pct,
+                e3_view_url,
                 e5_status,
                 e5_score_pct,
                 e5_view_url
@@ -344,7 +354,11 @@ def make_parser() -> argparse.ArgumentParser:
         required=True,
         choices=("easy", "medium", "hard"),
     )
-    parser.add_argument("--dataset", help="required for Easy and Medium")
+    parser.add_argument(
+        "--dataset",
+        action="append",
+        help="required for Easy and Medium; repeat to record paired runs",
+    )
     parser.add_argument("--server", help="override the competition service URL")
     parser.add_argument(
         "--from-output",
@@ -358,24 +372,38 @@ def main() -> int:
     args = make_parser().parse_args()
     if args.tier in {"easy", "medium"} and not args.dataset:
         raise SystemExit("--dataset is required for Easy and Medium")
+    datasets = args.dataset or [None]
+    if len(datasets) != len(set(datasets)):
+        raise SystemExit("--dataset values must be unique")
+    if args.from_output and len(datasets) != 1:
+        raise SystemExit("--from-output accepts exactly one --dataset")
     commit_hash = require_committed_worktree()
-    if args.from_output:
-        output, exit_code, command = read_existing_output(args)
-    else:
-        output, exit_code, command = submit(args)
-    number = persist(
-        architecture_key=args.architecture,
-        note=args.note,
-        commit_hash=commit_hash,
-        requested_tier=args.tier,
-        requested_dataset=args.dataset,
-        output=output,
-        exit_code=exit_code,
-        command=command,
-    )
+    numbers: list[int] = []
+    final_exit_code = 0
+    for dataset_id in datasets:
+        if args.from_output:
+            output, exit_code, command = read_existing_output(args)
+        else:
+            output, exit_code, command = submit(args, dataset_id)
+        numbers.append(
+            persist(
+                architecture_key=args.architecture,
+                note=args.note,
+                commit_hash=commit_hash,
+                requested_tier=args.tier,
+                requested_dataset=dataset_id,
+                output=output,
+                exit_code=exit_code,
+                command=command,
+            )
+        )
+        if exit_code:
+            final_exit_code = exit_code
     refresh_readme()
-    print(f"recorded submission {number} in {DATABASE_PATH.name}")
-    return exit_code
+    label = "submission" if len(numbers) == 1 else "submissions"
+    rendered_numbers = ", ".join(str(number) for number in numbers)
+    print(f"recorded {label} {rendered_numbers} in {DATABASE_PATH.name}")
+    return final_exit_code
 
 
 if __name__ == "__main__":
