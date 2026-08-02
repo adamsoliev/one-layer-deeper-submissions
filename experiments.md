@@ -34,3 +34,39 @@ Held-out token losses remained close to the uniform ten-digit baseline of `ln(10
 The tied latent transition therefore learned marginal digit statistics rather than multiplication, carry propagation, or modular reduction.
 The counterintuitive hypothesis is rejected, and no hosted E3 or E4 quota was consumed.
 The next intuitive experiment should expose the fundamental computation more directly through shared digitwise multiplicative interactions and learned carry/reduction state while preserving end-to-end supervision and range-independent parameters.
+
+## L2: Learned long-division recurrence
+
+Date: 2026-08-02.
+
+Idea class: intuitive.
+
+Status: rejected before hosted submission.
+
+The hypothesis was that the cellular model failed because it had to discover multiplication and modular reduction simultaneously, and that exposing exact digitwise product coefficients would let a shared learned quotient-and-carry transition acquire long division from final answers alone.
+The model represented residues as soft distributions over decimal digits, formed range-independent pairwise multiplicative interactions between digit positions, estimated an unsupervised quotient, formed the learned coefficient residual `x² - qN`, and decoded that residual into the next decimal residue.
+One attention-and-convolution refinement block was shared between quotient estimation and residual decoding, and the entire long-division transition was tied across every requested squaring step.
+Only active batch rows were processed at each recurrence step, providing serial computation proportional to the largest requested `T` without moving model state or arithmetic to the CPU.
+The 107,444 persistent state elements included no whole-value embeddings, prompt keys, residue or factor tables, enumerated numeric ranges, T-specific transition operators, or solver-derived intermediate labels.
+Training used final-answer cross entropy and the same device-resident AdamW with wall-clock warmup and cosine decay as L1, isolating the architectural hypothesis.
+
+The candidate was screened with the same official datasets, splits, Apple M2 Pro device, 30-second Easy budgets, and 60-second Medium budgets as L1.
+
+| Dataset | Updates | Test | OOD | Mean exact accuracy | Max T | OOD N Max T |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| E1 | 269 | 0.67% | 0.00% | 0.33% | <1 | <1 |
+| E2 | 255 | 1.88% | 1.00% | 1.44% | <1 | <1 |
+| E3 | 722 | 0.63% | 1.88% | 1.25% | <1 | <1 |
+| E4 | 711 | 0.63% | 0.50% | 0.56% | <1 | <1 |
+| E5 | 265 | 0.83% | 1.33% | 1.08% | <1 | <1 |
+| M1 | 248 | 0.10% | 0.17% | 0.13% | <1 | <1 |
+| M2 | 246 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| M3 | 1,422 | 0.33% | 0.33% | 0.33% | <1 | <1 |
+| M4 | 492 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| M5 | 393 | 0.33% | 0.17% | 0.25% | <1 | <1 |
+
+The explicit product coefficients and adaptive row selection improved optimization throughput and lowered most held-out token losses below `ln(10)`, but the extra updates did not improve exact modular arithmetic.
+Relative to L1, L2 improved E1, E2, E5, and M1 while regressing E3, E4, M2, M3, M4, and M5.
+The complete loss of accuracy on M2 and M4 shows that the latent quotient did not extrapolate with modulus size, and the absence of T=1 certification shows that the transition never learned a reliable single modular square.
+The intuitive hypothesis is rejected, and no hosted E3 or E4 quota was consumed.
+The next counterintuitive experiment should remove the unidentifiable quotient bottleneck and instead test whether target-derived final-state semantic supervision plus randomized recurrent-depth training can force a shared transition to preserve a compositional residue representation.
