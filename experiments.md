@@ -253,3 +253,41 @@ E3 and M3 were unchanged at 1.81% and 0.48%, while E2 was unchanged within one e
 Thus the gradient mismatch was consequential for shallow fitting but was not the primary barrier to modular composition: no profile certified T=1, and the nested digit scan still limited deeper datasets to 41–60 optimizer updates.
 The counterintuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
 The next intuitive experiment should replace the inner serial Horner scan with a parallel carry-lookahead-style reducer built from shared dilated local blocks, preserving bounded radix interactions while reducing physical depth per square from linear to logarithmic in the digit count.
+
+## L8: Parallel carry-lookahead recurrence
+
+Date: 2026-08-02.
+
+Idea class: intuitive.
+
+Status: rejected before hosted submission.
+
+The hypothesis was that L6 and L7 spent too much of the fixed clock scanning digits inside every square, and that parallel quotient and carry fields with logarithmic receptive-field growth could preserve their bounded arithmetic bias while exposing the parameters to several times more optimizer updates.
+L8 formed all base-4 product coefficients through explicit pairwise multiplicative interactions, predicted twelve bounded base-4 quotient digits in parallel, and formed the coefficient residual `x² - qN` without a whole-value quotient.
+One local block was shared over dilations 1, 2, 4, and 8 to give the quotient predictor full receptive field in four updates; a second shared dilated block predicted a continuous carry field and twelve bounded residue digits from the coefficient residual.
+The invariant loss required `raw + incoming_carry - 4·outgoing_carry` to equal the predicted residue digits in the low positions and zero in the high positions, while also requiring the residue to lie in `[0,N)` and the final carry to vanish.
+This coefficient identity supplied a dense algebraic constraint without quotient, carry, or residue labels for any intermediate square.
+L8 retained L7's final-answer sequence and base-4 losses, annealed soft training decisions, hard evaluation decisions, Fourier decimal decoder, optimizer, and outer transition tied across `T`.
+Its 135,274 persistent state elements remained range-independent and contained none of the prohibited lookup or solver mechanisms.
+
+The frozen candidate was screened with the same official datasets, splits, Apple M2 Pro device, 30-second Easy budgets, and 60-second Medium budgets as the preceding experiments.
+
+| Dataset | Updates | Test | OOD | Mean exact accuracy | Max T | OOD N Max T |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| E1 | 244 | 6.67% | 10.00% | 8.33% | <1 | <1 |
+| E2 | 248 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| E3 | 628 | 1.25% | 2.37% | 1.81% | <1 | <1 |
+| E4 | 624 | 0.37% | 1.33% | 0.85% | <1 | <1 |
+| E5 | 272 | 1.33% | 1.50% | 1.42% | <1 | <1 |
+| M1 | 216 | 0.00% | 0.07% | 0.03% | <1 | <1 |
+| M2 | 213 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| M3 | 1,244 | 0.25% | 0.40% | 0.33% | <1 | <1 |
+| M4 | 414 | 0.19% | 0.18% | 0.18% | <1 | <1 |
+| M5 | 370 | 0.42% | 0.33% | 0.38% | <1 | <1 |
+
+The parallel design completed between two and five times as many updates as L7 and reduced E3 held-out token loss from about 2.49 to 2.27.
+Nevertheless, E1, E3, E4, E5, and M1 produced exactly the same exact-example counts as L7, E2 and M2 regressed to zero, and M3 regressed from 0.48% to 0.33%; only M4 and M5 improved.
+By the end of E3 training, the combined loss had fallen to 2.81, showing that the coefficient invariants were optimizable, but the hard transition still failed every T=1 certification profile.
+The physical-depth hypothesis is therefore only partly supported: parallel lookahead solved the update-throughput bottleneck, but the final-answer and algebraic constraints still did not identify the correct latent quotient and residue.
+The intuitive candidate is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
+The next counterintuitive experiment should add target-conditioned bidirectional latent consistency during training: a learned reverse transition starts from the provided final answer and meets the forward tied recurrence at an interior latent state, providing dense credit assignment from final labels without exposing solver-derived intermediate residues.

@@ -1,4 +1,4 @@
-"""Bounded radix-gate recurrence for repeated modular squaring."""
+"""Parallel carry-lookahead recurrence for repeated modular squaring."""
 
 from __future__ import annotations
 
@@ -19,10 +19,12 @@ from torch import Tensor, nn
 
 RADIX = 4
 STATE_DIGITS = 12
+PRODUCT_DIGITS = 2 * STATE_DIGITS
 OUTPUT_DIGITS = 8
 WIDTH = 64
-CARRY_WIDTH = 48
+HIDDEN_WIDTH = 128
 FOURIER_HARMONICS = 8
+REFINEMENT_DILATIONS = (1, 2, 4, 8)
 MAX_TRAIN_TIME_STEPS = 16
 MAX_EVAL_TIME_STEPS = 64
 TRAIN_BATCH_SIZE = 128
@@ -39,17 +41,27 @@ X_TOKEN_ID = 3
 T_TOKEN_ID = 4
 DIGIT_OFFSET = 7
 NUM_DECIMAL_DIGITS = 10
-QUOTIENT_MIN = 0
-QUOTIENT_MAX = 2 * RADIX - 2
-CARRY_MIN = -12
-CARRY_MAX = 12
-MAX_RAW_DIGIT_MAGNITUDE = 24.0
+MAX_PRODUCT_COEFFICIENT = STATE_DIGITS * (RADIX - 1) ** 2
 
 
 class Config:
     def __init__(self, vocab_size: int, max_seq_len: int) -> None:
         self.vocab_size = vocab_size
         self.max_seq_len = max_seq_len
+
+
+class RMSNorm(nn.Module):
+    def __init__(self, width: int) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(width))
+
+    def forward(self, hidden: Tensor) -> Tensor:
+        return F.rms_norm(
+            hidden,
+            (hidden.shape[-1],),
+            self.weight,
+            eps=1e-5,
+        )
 
 
 def relaxed_choice(
@@ -70,239 +82,222 @@ def relaxed_choice(
     return value, entropy
 
 
-class LearnedRadixSquare(nn.Module):
-    """Learn bounded Horner reduction and local radix carry gates."""
+class SharedDilatedBlock(nn.Module):
+    """Reuse one local nonlinear update at exponentially growing spans."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.quotient_network = nn.Sequential(
-            nn.Linear(7, WIDTH),
-            nn.SiLU(),
-            nn.Linear(WIDTH, WIDTH),
-            nn.SiLU(),
-            nn.Linear(WIDTH, QUOTIENT_MAX - QUOTIENT_MIN + 1),
-        )
-        self.carry_scan = nn.GRU(9, CARRY_WIDTH, batch_first=True)
-        self.carry_head = nn.Linear(
-            CARRY_WIDTH,
-            CARRY_MAX - CARRY_MIN + 1,
-        )
-        self.digit_head = nn.Linear(CARRY_WIDTH, RADIX)
-        self.register_buffer(
-            "quotient_choices",
-            torch.arange(QUOTIENT_MIN, QUOTIENT_MAX + 1, dtype=torch.float32),
-        )
-        self.register_buffer(
-            "carry_choices",
-            torch.arange(CARRY_MIN, CARRY_MAX + 1, dtype=torch.float32),
-        )
+        self.input_norm = RMSNorm(WIDTH)
+        self.local_weight = nn.Parameter(torch.empty(WIDTH, WIDTH, 3))
+        self.local_bias = nn.Parameter(torch.empty(WIDTH))
+        self.left = nn.Linear(2 * WIDTH, HIDDEN_WIDTH)
+        self.right = nn.Linear(2 * WIDTH, HIDDEN_WIDTH)
+        self.output = nn.Linear(HIDDEN_WIDTH, WIDTH)
+        self.gate = nn.Linear(2 * WIDTH, WIDTH)
+        self.output_norm = RMSNorm(WIDTH)
+        nn.init.normal_(self.local_weight, mean=0.0, std=0.02)
+        nn.init.normal_(self.local_bias, mean=0.0, std=0.002)
+
+    def forward(self, state: Tensor, dilation: int) -> Tensor:
+        normalized = self.input_norm(state)
+        local = F.conv1d(
+            normalized.transpose(1, 2),
+            self.local_weight,
+            self.local_bias,
+            padding=dilation,
+            dilation=dilation,
+        ).transpose(1, 2)
+        features = torch.cat((normalized, local), dim=-1)
+        hidden = F.silu(self.left(features)) * torch.tanh(self.right(features))
+        update = self.output(hidden)
+        gate = torch.sigmoid(self.gate(features))
+        return self.output_norm(state + gate * update)
+
+
+class ParallelRadixSquare(nn.Module):
+    """Predict quotient digits and canonicalize their residual in parallel."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.product_projection = nn.Linear(8, WIDTH)
+        self.quotient_block = SharedDilatedBlock()
+        self.quotient_head = nn.Linear(WIDTH, RADIX)
+        self.residual_projection = nn.Linear(9, WIDTH)
+        self.canonical_block = SharedDilatedBlock()
+        self.carry_head = nn.Linear(WIDTH, 1)
+        self.digit_head = nn.Linear(WIDTH, RADIX)
         self.register_buffer(
             "digit_choices",
             torch.arange(RADIX, dtype=torch.float32),
         )
+        coefficient_map = torch.zeros(
+            STATE_DIGITS,
+            STATE_DIGITS,
+            PRODUCT_DIGITS,
+        )
+        for left in range(STATE_DIGITS):
+            for right in range(STATE_DIGITS):
+                coefficient_map[left, right, left + right] = 1.0
+        self.register_buffer("coefficient_map", coefficient_map)
         self.register_buffer(
             "radix_powers_float",
             RADIX ** torch.arange(STATE_DIGITS, dtype=torch.float32),
         )
-        positions = torch.linspace(0.0, 1.0, STATE_DIGITS)
-        self.register_buffer("digit_positions", positions)
-        self.register_buffer(
-            "digit_indices",
-            torch.arange(STATE_DIGITS, dtype=torch.long),
-        )
+        positions = torch.linspace(0.0, 1.0, PRODUCT_DIGITS)
+        self.register_buffer("product_positions", positions)
 
     def forward(
         self,
-        multiplicand: Tensor,
+        residue_digits: Tensor,
         modulus_digits: Tensor,
-        microsteps: int = STATE_DIGITS,
-        temperature: float = 1.0,
-        hard: bool = True,
+        temperature: float,
+        hard: bool,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        accumulator = torch.zeros_like(multiplicand)
-        final_digit_logits = multiplicand.new_zeros(
-            multiplicand.shape[0],
-            STATE_DIGITS,
-            RADIX,
+        product_coefficients = torch.einsum(
+            "bi,bj,ijk->bk",
+            residue_digits,
+            residue_digits,
+            self.coefficient_map.to(residue_digits.dtype),
+        )
+        extended_residue = F.pad(
+            residue_digits,
+            (0, PRODUCT_DIGITS - STATE_DIGITS),
+        )
+        extended_modulus = F.pad(
+            modulus_digits,
+            (0, PRODUCT_DIGITS - STATE_DIGITS),
+        )
+        positions = self.product_positions.to(residue_digits.dtype)[None, :].expand(
+            residue_digits.shape[0],
+            -1,
+        )
+        product_features = self._product_features(
+            product_coefficients,
+            extended_residue,
+            extended_modulus,
+            positions,
+        )
+        quotient_state = self.product_projection(product_features)
+        for dilation in REFINEMENT_DILATIONS:
+            quotient_state = self.quotient_block(quotient_state, dilation)
+        quotient_logits = self.quotient_head(
+            quotient_state[:, :STATE_DIGITS],
+        )
+        quotient_digits, quotient_entropy = relaxed_choice(
+            quotient_logits,
+            self.digit_choices.to(quotient_logits.dtype),
+            temperature,
+            hard=hard,
+        )
+        quotient_product = torch.einsum(
+            "bi,bj,ijk->bk",
+            quotient_digits,
+            modulus_digits,
+            self.coefficient_map.to(quotient_digits.dtype),
+        )
+        raw_coefficients = product_coefficients - quotient_product
+        residual_features = self._residual_features(
+            raw_coefficients,
+            product_coefficients,
+            extended_residue,
+            extended_modulus,
+            positions,
+        )
+        canonical_state = self.residual_projection(residual_features)
+        for dilation in REFINEMENT_DILATIONS:
+            canonical_state = self.canonical_block(canonical_state, dilation)
+        carries = self.carry_head(canonical_state).squeeze(-1)
+        residue_logits = self.digit_head(
+            canonical_state[:, :STATE_DIGITS],
+        )
+        next_digits, residue_entropy = relaxed_choice(
+            residue_logits,
+            self.digit_choices.to(residue_logits.dtype),
+            temperature,
+            hard=hard,
+        )
+
+        incoming_carries = F.pad(carries[:, :-1], (1, 0))
+        normalized_coefficients = raw_coefficients + incoming_carries - RADIX * carries
+        target_coefficients = F.pad(
+            next_digits,
+            (0, PRODUCT_DIGITS - STATE_DIGITS),
+        )
+        coefficient_error = (normalized_coefficients - target_coefficients).abs() / (
+            MAX_PRODUCT_COEFFICIENT + 1.0
+        )
+        residue_value = torch.einsum(
+            "bd,d->b",
+            next_digits.float(),
+            self.radix_powers_float,
         )
         modulus_value = torch.einsum(
             "bd,d->b",
             modulus_digits.float(),
             self.radix_powers_float,
         )
-        multiplicand_value = torch.einsum(
-            "bd,d->b",
-            multiplicand.float(),
-            self.radix_powers_float,
+        denominator = modulus_value.clamp_min(1.0)
+        below_zero = F.relu(-residue_value / denominator)
+        above_modulus = F.relu(
+            (residue_value - (modulus_value - 1.0)) / denominator,
         )
-        highest_digit = (
-            (modulus_digits > 0).long() * self.digit_indices[None, :]
-        ).amax(dim=1)
-        invariant_losses: list[Tensor] = []
-        entropies: list[Tensor] = []
-
-        for rank in range(microsteps):
-            active_indices = torch.nonzero(
-                highest_digit >= rank,
-                as_tuple=False,
-            ).squeeze(-1)
-            if active_indices.numel() == 0:
-                continue
-            active_accumulator = accumulator[active_indices]
-            active_multiplicand = multiplicand[active_indices]
-            active_modulus = modulus_digits[active_indices]
-            active_modulus_value = modulus_value[active_indices]
-            active_multiplicand_value = multiplicand_value[active_indices]
-            digit_indices = highest_digit[active_indices] - rank
-            multiplier_digit = active_multiplicand.gather(
-                1,
-                digit_indices[:, None],
-            ).squeeze(1)
-
-            shifted_accumulator = F.pad(
-                active_accumulator[:, :-1],
-                (1, 0),
-            )
-            candidate_digits = (
-                shifted_accumulator + multiplier_digit[:, None] * active_multiplicand
-            )
-            accumulator_value = torch.einsum(
-                "bd,d->b",
-                active_accumulator.float(),
-                self.radix_powers_float,
-            )
-            candidate_value = torch.einsum(
-                "bd,d->b",
-                candidate_digits.float(),
-                self.radix_powers_float,
-            )
-            denominator = active_modulus_value.clamp_min(1.0)
-            candidate_ratio = candidate_value / denominator
-            quotient_features = torch.stack(
-                (
-                    candidate_ratio / (QUOTIENT_MAX + 1.0),
-                    torch.tanh(candidate_ratio),
-                    accumulator_value / denominator,
-                    active_multiplicand_value / denominator,
-                    multiplier_digit.float() / (RADIX - 1),
-                    torch.log1p(denominator) / math.log(16_777_217.0),
-                    torch.ones_like(candidate_ratio),
-                ),
-                dim=-1,
-            ).to(multiplicand.dtype)
-            quotient_logits = self.quotient_network(quotient_features)
-            quotient, quotient_entropy = relaxed_choice(
-                quotient_logits,
-                self.quotient_choices.to(quotient_logits.dtype),
-                temperature,
-                hard=hard,
-            )
-
-            raw_digits = candidate_digits - quotient[:, None] * active_modulus
-            raw_features = self._carry_features(
-                raw_digits,
-                active_accumulator,
-                active_multiplicand,
-                active_modulus,
-                quotient,
-                multiplier_digit,
-            )
-            carry_state, _ = self.carry_scan(raw_features)
-            carry_logits = self.carry_head(carry_state)
-            carries, carry_entropy = relaxed_choice(
-                carry_logits,
-                self.carry_choices.to(carry_logits.dtype),
-                temperature,
-                hard=hard,
-            )
-            digit_logits = self.digit_head(carry_state)
-            next_digits, digit_entropy = relaxed_choice(
-                digit_logits,
-                self.digit_choices.to(digit_logits.dtype),
-                temperature,
-                hard=hard,
-            )
-            incoming_carries = F.pad(carries[:, :-1], (1, 0))
-            normalized_coefficients = raw_digits + incoming_carries - RADIX * carries
-            accumulator = accumulator.index_copy(
-                0,
-                active_indices,
-                next_digits,
-            )
-            final_digit_logits = final_digit_logits.index_copy(
-                0,
-                active_indices,
-                digit_logits,
-            )
-
-            reduced_value = candidate_value - quotient.float() * active_modulus_value
-            represented_value = torch.einsum(
-                "bd,d->b",
-                next_digits.float(),
-                self.radix_powers_float,
-            )
-            below_zero = F.relu(-reduced_value / denominator)
-            above_modulus = F.relu(
-                (reduced_value - (active_modulus_value - 1.0)) / denominator,
-            )
-            below_digit = F.relu(
-                -normalized_coefficients.float() / RADIX,
-            )
-            above_digit = F.relu(
-                (normalized_coefficients.float() - (RADIX - 1)) / RADIX,
-            )
-            representation_error = (
-                represented_value - reduced_value
-            ).abs() / denominator
-            overflow = carries[:, -1].float() / max(
-                abs(CARRY_MIN),
-                CARRY_MAX,
-            )
-            invariant_losses.append(
-                torch.log1p(below_zero).square().mean()
-                + torch.log1p(above_modulus).square().mean()
-                + torch.log1p(below_digit).square().mean()
-                + torch.log1p(above_digit).square().mean()
-                + torch.log1p(representation_error).square().mean()
-                + overflow.square().mean(),
-            )
-            entropies.append(
-                quotient_entropy.float().mean()
-                + carry_entropy.float().mean()
-                + digit_entropy.float().mean(),
-            )
-
-        return (
-            accumulator,
-            final_digit_logits,
-            torch.stack(invariant_losses).mean(),
-            torch.stack(entropies).mean(),
+        overflow = carries[:, -1].float() / (MAX_PRODUCT_COEFFICIENT + 1.0)
+        invariant_loss = (
+            torch.log1p(coefficient_error).square().mean()
+            + torch.log1p(below_zero).square().mean()
+            + torch.log1p(above_modulus).square().mean()
+            + overflow.square().mean()
         )
+        entropy = quotient_entropy.float().mean() + residue_entropy.float().mean()
+        return next_digits, residue_logits, invariant_loss, entropy
 
-    def _carry_features(
-        self,
-        raw_digits: Tensor,
-        accumulator: Tensor,
-        multiplicand: Tensor,
-        modulus_digits: Tensor,
-        quotient: Tensor,
-        multiplier_digit: Tensor,
+    @staticmethod
+    def _product_features(
+        product: Tensor,
+        residue: Tensor,
+        modulus: Tensor,
+        positions: Tensor,
     ) -> Tensor:
-        positions = self.digit_positions.to(raw_digits.dtype)[None, :].expand(
-            raw_digits.shape[0],
-            -1,
+        normalized_product = product / MAX_PRODUCT_COEFFICIENT
+        logarithm = torch.log1p(product) / math.log1p(
+            MAX_PRODUCT_COEFFICIENT,
         )
-        normalized_quotient = quotient[:, None] / QUOTIENT_MAX
-        normalized_multiplier = multiplier_digit[:, None] / (RADIX - 1)
+        residue = residue / (RADIX - 1)
+        modulus = modulus / (RADIX - 1)
         return torch.stack(
             (
-                raw_digits / MAX_RAW_DIGIT_MAGNITUDE,
-                torch.tanh(raw_digits / RADIX),
-                accumulator / (RADIX - 1),
-                multiplicand / (RADIX - 1),
-                modulus_digits / (RADIX - 1),
-                normalized_quotient.expand_as(raw_digits),
-                normalized_multiplier.expand_as(raw_digits),
+                normalized_product,
+                logarithm,
+                residue,
+                modulus,
+                residue * modulus,
+                positions,
+                torch.sin(2.0 * math.pi * positions),
+                torch.cos(2.0 * math.pi * positions),
+            ),
+            dim=-1,
+        )
+
+    @staticmethod
+    def _residual_features(
+        raw: Tensor,
+        product: Tensor,
+        residue: Tensor,
+        modulus: Tensor,
+        positions: Tensor,
+    ) -> Tensor:
+        scale = MAX_PRODUCT_COEFFICIENT + 1.0
+        residue = residue / (RADIX - 1)
+        modulus = modulus / (RADIX - 1)
+        return torch.stack(
+            (
+                raw / scale,
+                torch.tanh(raw / RADIX),
+                product / MAX_PRODUCT_COEFFICIENT,
+                residue,
+                modulus,
+                residue * modulus,
+                positions,
                 torch.sin(2.0 * math.pi * positions),
                 torch.cos(2.0 * math.pi * positions),
             ),
@@ -310,13 +305,13 @@ class LearnedRadixSquare(nn.Module):
         )
 
 
-class RadixGateModel(nn.Module):
-    """Compose one bounded learned radix circuit per requested square."""
+class ParallelCarryModel(nn.Module):
+    """Compose one parallel learned radix circuit per requested square."""
 
     def __init__(self, spec: ModelSpec) -> None:
         super().__init__()
         self.config = Config(spec.vocab_size, spec.max_seq_len)
-        self.transition = LearnedRadixSquare()
+        self.transition = ParallelRadixSquare()
         self.decimal_decoder = nn.Sequential(
             nn.Linear(2 * FOURIER_HARMONICS, WIDTH),
             nn.SiLU(),
@@ -347,12 +342,10 @@ class RadixGateModel(nn.Module):
 
     @staticmethod
     def _initialize(module: nn.Module) -> None:
-        if isinstance(module, (nn.Linear, nn.GRU)):
-            for name, parameter in module.named_parameters(recurse=False):
-                if "weight" in name:
-                    nn.init.normal_(parameter, mean=0.0, std=0.02)
-                elif "bias" in name:
-                    nn.init.normal_(parameter, mean=0.0, std=0.002)
+        if isinstance(module, nn.Linear):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                nn.init.normal_(module.bias, mean=0.0, std=0.002)
 
     def forward(
         self,
@@ -378,8 +371,6 @@ class RadixGateModel(nn.Module):
         )
         invariant_losses: list[Tensor] = []
         entropies: list[Tensor] = []
-
-        microsteps = STATE_DIGITS
         maximum_steps = MAX_TRAIN_TIME_STEPS if self.training else MAX_EVAL_TIME_STEPS
 
         for step in range(maximum_steps):
@@ -397,7 +388,6 @@ class RadixGateModel(nn.Module):
             ) = self.transition(
                 state[active_indices],
                 modulus_digits[active_indices],
-                microsteps,
                 self.gate_temperature,
                 not self.training,
             )
@@ -584,13 +574,13 @@ class DeviceAdamW(torch.optim.Optimizer):
 
 
 class WallClockSchedule:
-    """Spend the learning-rate schedule according to the evaluator clock."""
+    """Coordinate the learning rate and soft-gate temperature."""
 
     def __init__(
         self,
         optimizer: torch.optim.Optimizer,
         training_time_seconds: float,
-        model: RadixGateModel,
+        model: ParallelCarryModel,
     ) -> None:
         self.optimizer = optimizer
         self.model = model
@@ -623,8 +613,8 @@ class WallClockSchedule:
         self._set_multiplier(multiplier)
 
 
-def build_model(spec: ModelSpec) -> RadixGateModel:
-    model = RadixGateModel(spec)
+def build_model(spec: ModelSpec) -> ParallelCarryModel:
+    model = ParallelCarryModel(spec)
     assert_model_state(model, spec)
     return model
 
@@ -649,7 +639,7 @@ def build_optimizer(
         betas=(0.9, 0.98),
         eps=1e-8,
     )
-    if not isinstance(model, RadixGateModel):
+    if not isinstance(model, ParallelCarryModel):
         raise TypeError("unexpected model type")
     scheduler = WallClockSchedule(optimizer, spec.training_time_seconds, model)
     return OptimizerBundle(optimizer, scheduler)
