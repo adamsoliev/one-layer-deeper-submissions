@@ -70,3 +70,39 @@ Relative to L1, L2 improved E1, E2, E5, and M1 while regressing E3, E4, M2, M3, 
 The complete loss of accuracy on M2 and M4 shows that the latent quotient did not extrapolate with modulus size, and the absence of T=1 certification shows that the transition never learned a reliable single modular square.
 The intuitive hypothesis is rejected, and no hosted E3 or E4 quota was consumed.
 The next counterintuitive experiment should remove the unidentifiable quotient bottleneck and instead test whether target-derived final-state semantic supervision plus randomized recurrent-depth training can force a shared transition to preserve a compositional residue representation.
+
+## L3: Hard semantic refinement recurrence
+
+Date: 2026-08-02.
+
+Idea class: counterintuitive.
+
+Status: rejected before hosted submission.
+
+The hypothesis was that L2's soft residue distributions permitted average-digit shortcuts, and that a hard straight-through residue bottleneck combined with dense final-state semantics would force the tied transition to preserve compositional decimal meaning.
+The model removed the unidentifiable quotient, retained range-independent digitwise multiplicative coefficients, and refined product and modulus cells directly into the next residue with one tied attention-and-convolution block.
+Predicted digits were discretized between squaring steps with a straight-through estimator, while the number of physical refinement iterations was sampled independently between two and six during training and fixed at six during evaluation.
+The custom loss reconstructed the official final target from its decimal label tokens and supervised the final latent state as eight decimal digits and 24 binary bits in addition to the evaluator-facing sequence loss.
+These auxiliary targets were alternate representations of the final answer rather than solver-derived labels for any intermediate squaring step.
+The 186,266 persistent state elements contained no whole-value embeddings, prompt keys, residue or factor tables, enumerated numeric ranges, or operators specialized to a dataset or particular `T`.
+
+The candidate was screened with the same official datasets, splits, Apple M2 Pro device, 30-second Easy budgets, and 60-second Medium budgets as L1 and L2.
+
+| Dataset | Updates | Test | OOD | Mean exact accuracy | Max T | OOD N Max T |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| E1 | 200 | 6.00% | 10.00% | 8.00% | <1 | <1 |
+| E2 | 175 | 1.88% | 1.00% | 1.44% | <1 | <1 |
+| E3 | 429 | 1.13% | 2.75% | 1.94% | <1 | <1 |
+| E4 | 408 | 0.50% | 1.50% | 1.00% | <1 | <1 |
+| E5 | 176 | 0.42% | 0.83% | 0.63% | <1 | <1 |
+| M1 | 154 | 0.07% | 0.20% | 0.13% | <1 | <1 |
+| M2 | 154 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| M3 | 868 | 0.33% | 0.37% | 0.35% | <1 | <1 |
+| M4 | 265 | 0.19% | 0.18% | 0.18% | <1 | <1 |
+| M5 | 266 | 0.10% | 0.10% | 0.10% | <1 | <1 |
+
+L3 produced the best valid local E1, E3, E4, and M4 results so far, showing that dense final-state semantics reduced the soft average-digit shortcut on some fixed-depth tasks.
+The gains remained small, E2 did not improve over L2, E5 and M5 regressed, M2 remained exactly 0%, and every matched and unseen-modulus certification profile failed at T=1.
+Hundreds of fixed-T updates therefore optimized useful output statistics without producing a correct single modular-square transition, while randomized physical refinement did not make the hard latent state stable under composition.
+The counterintuitive hypothesis is rejected, and no hosted E3 or E4 quota was consumed.
+The next intuitive experiment should replace global refinement with a shared bidirectional digit-scan transducer whose recurrent carry state explicitly follows the low-to-high multiplication and high-to-low reduction directions while retaining final-state semantic supervision.

@@ -1,4 +1,4 @@
-"""Learned long-division recurrence for repeated modular squaring."""
+"""Hard semantic refinement recurrence for repeated modular squaring."""
 
 from __future__ import annotations
 
@@ -12,16 +12,19 @@ from benchmark import (
     OptimizerBundle,
     OptimizerSpec,
     Submission,
+    TokenLossBatch,
     assert_model_state,
 )
 from torch import Tensor, nn
 
-WIDTH = 48
-HIDDEN_WIDTH = 128
+WIDTH = 64
+HIDDEN_WIDTH = 160
 NUM_HEADS = 4
 MAX_DECIMAL_DIGITS = 8
+MAX_VALUE_BITS = 24
 PRODUCT_DIGITS = 2 * MAX_DECIMAL_DIGITS
-REFINEMENT_STEPS = 2
+MIN_REFINEMENT_STEPS = 2
+MAX_REFINEMENT_STEPS = 6
 MAX_TRAIN_TIME_STEPS = 16
 MAX_EVAL_TIME_STEPS = 64
 TRAIN_BATCH_SIZE = 128
@@ -30,6 +33,8 @@ MAX_TRAINING_STEPS = 1_000_000
 BASE_LEARNING_RATE = 3e-3
 MIN_LEARNING_RATE_RATIO = 0.05
 WARMUP_FRACTION = 0.05
+SEMANTIC_DECIMAL_WEIGHT = 0.5
+SEMANTIC_BINARY_WEIGHT = 0.25
 PAD_TOKEN_ID = 0
 X_TOKEN_ID = 3
 T_TOKEN_ID = 4
@@ -58,8 +63,8 @@ class RMSNorm(nn.Module):
         )
 
 
-class ArithmeticRefinement(nn.Module):
-    """Share local carry propagation and global quotient interaction."""
+class SemanticRefinement(nn.Module):
+    """Share local carry flow and global modulus interaction."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -134,26 +139,26 @@ class ArithmeticRefinement(nn.Module):
         return self.output_norm(state + 0.25 * gate * update)
 
 
-class LearnedLongDivision(nn.Module):
-    """Estimate a quotient and decode its learned coefficient residual."""
+class SemanticSquaringTransition(nn.Module):
+    """Refine product coefficients directly into semantic residue digits."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.product_projection = nn.Linear(7, WIDTH)
-        self.modulus_projection = nn.Linear(5, WIDTH)
-        self.residual_projection = nn.Linear(8, WIDTH)
-        self.quotient_context = nn.Linear(WIDTH, WIDTH, bias=False)
-        self.refinement = ArithmeticRefinement()
-        self.quotient_head = nn.Linear(WIDTH, NUM_DIGITS)
+        self.product_projection = nn.Linear(8, WIDTH)
+        self.modulus_projection = nn.Linear(6, WIDTH)
+        self.refinement = SemanticRefinement()
         self.residue_head = nn.Linear(WIDTH, NUM_DIGITS)
-        self.quotient_temperature = nn.Parameter(torch.tensor(1.0))
+        self.bit_query_projection = nn.Linear(5, WIDTH)
+        self.bit_key = nn.Linear(WIDTH, WIDTH, bias=False)
+        self.bit_value = nn.Linear(WIDTH, WIDTH, bias=False)
+        self.bit_head = nn.Linear(WIDTH, 1)
 
     def forward(
         self,
         residue_probabilities: Tensor,
         modulus_digits: Tensor,
         coefficient_map: Tensor,
-        positions: Tensor,
+        product_positions: Tensor,
     ) -> tuple[Tensor, Tensor]:
         digit_values = torch.arange(
             NUM_DIGITS,
@@ -165,90 +170,64 @@ class LearnedLongDivision(nn.Module):
             residue_probabilities,
             digit_values,
         )
-        square_coefficients = self._multiply_digits(
+        product_coefficients = torch.einsum(
+            "bi,bj,ijk->bk",
             residue_digits,
             residue_digits,
-            coefficient_map,
+            coefficient_map.to(residue_digits.dtype),
+        )
+        extended_residue = F.pad(
+            residue_digits,
+            (0, PRODUCT_DIGITS - MAX_DECIMAL_DIGITS),
         )
         extended_modulus = F.pad(
             modulus_digits,
             (0, PRODUCT_DIGITS - MAX_DECIMAL_DIGITS),
         )
         product_features = self._product_features(
-            square_coefficients,
+            product_coefficients,
+            extended_residue,
             extended_modulus,
-            positions,
+            product_positions,
         )
         modulus_features = self._modulus_features(
+            extended_residue,
             extended_modulus,
-            positions,
+            product_positions,
         )
-        modulus_context = self.modulus_projection(modulus_features)
-        quotient_state = self.product_projection(product_features)
-        for _ in range(REFINEMENT_STEPS):
-            quotient_state = self.refinement(
-                quotient_state,
-                modulus_context,
+        state = self.product_projection(product_features)
+        context = self.modulus_projection(modulus_features)
+        if self.training:
+            refinement_depth = torch.randint(
+                MIN_REFINEMENT_STEPS,
+                MAX_REFINEMENT_STEPS + 1,
+                (state.shape[0],),
+                device=state.device,
             )
-
-        temperature = self.quotient_temperature.abs().clamp_min(0.25)
-        quotient_logits = self.quotient_head(
-            quotient_state[:, :MAX_DECIMAL_DIGITS],
-        )
-        quotient_probabilities = F.softmax(
-            quotient_logits / temperature,
-            dim=-1,
-        )
-        quotient_digits = torch.einsum(
-            "bdk,k->bd",
-            quotient_probabilities,
-            digit_values,
-        )
-        quotient_product = self._multiply_digits(
-            quotient_digits,
-            modulus_digits,
-            coefficient_map,
-        )
-        residual_coefficients = square_coefficients - quotient_product
-        extended_quotient = F.pad(
-            quotient_digits,
-            (0, PRODUCT_DIGITS - MAX_DECIMAL_DIGITS),
-        )
-        residual_features = self._residual_features(
-            residual_coefficients,
-            square_coefficients,
-            extended_modulus,
-            extended_quotient,
-            positions,
-        )
-        residue_state = self.residual_projection(residual_features)
-        residue_context = modulus_context + self.quotient_context(quotient_state)
-        for _ in range(REFINEMENT_STEPS):
-            residue_state = self.refinement(
-                residue_state,
-                residue_context,
+        else:
+            refinement_depth = torch.full(
+                (state.shape[0],),
+                MAX_REFINEMENT_STEPS,
+                device=state.device,
+                dtype=torch.long,
+            )
+        for step in range(MAX_REFINEMENT_STEPS):
+            proposal = self.refinement(state, context)
+            state = torch.where(
+                (refinement_depth > step)[:, None, None],
+                proposal,
+                state,
             )
         residue_logits = self.residue_head(
-            residue_state[:, :MAX_DECIMAL_DIGITS],
+            state[:, :MAX_DECIMAL_DIGITS],
         )
-        return residue_logits, quotient_logits
-
-    @staticmethod
-    def _multiply_digits(
-        left: Tensor,
-        right: Tensor,
-        coefficient_map: Tensor,
-    ) -> Tensor:
-        return torch.einsum(
-            "bi,bj,ijk->bk",
-            left,
-            right,
-            coefficient_map.to(left.dtype),
-        )
+        binary_logits = self._decode_bits(state)
+        return residue_logits, binary_logits
 
     @staticmethod
     def _product_features(
         coefficients: Tensor,
+        residue: Tensor,
         modulus: Tensor,
         positions: Tensor,
     ) -> Tensor:
@@ -256,13 +235,15 @@ class LearnedLongDivision(nn.Module):
         logarithm = torch.log1p(coefficients) / math.log1p(
             MAX_PRODUCT_COEFFICIENT,
         )
+        residue = residue / 9.0
         modulus = modulus / 9.0
         return torch.stack(
             (
                 normalized,
                 logarithm,
+                residue,
                 modulus,
-                normalized * modulus,
+                residue * modulus,
                 positions,
                 torch.sin(2.0 * math.pi * positions),
                 torch.cos(2.0 * math.pi * positions),
@@ -271,54 +252,60 @@ class LearnedLongDivision(nn.Module):
         )
 
     @staticmethod
-    def _modulus_features(modulus: Tensor, positions: Tensor) -> Tensor:
+    def _modulus_features(
+        residue: Tensor,
+        modulus: Tensor,
+        positions: Tensor,
+    ) -> Tensor:
+        residue = residue / 9.0
         modulus = modulus / 9.0
         return torch.stack(
             (
+                residue,
                 modulus,
+                residue * modulus,
                 positions,
                 torch.sin(2.0 * math.pi * positions),
                 torch.cos(2.0 * math.pi * positions),
-                (modulus != 0).to(modulus.dtype),
             ),
             dim=-1,
         )
 
-    @staticmethod
-    def _residual_features(
-        residual: Tensor,
-        square: Tensor,
-        modulus: Tensor,
-        quotient: Tensor,
-        positions: Tensor,
-    ) -> Tensor:
-        residual_scale = float(MAX_PRODUCT_COEFFICIENT)
-        signed_logarithm = residual.sign() * torch.log1p(residual.abs())
-        signed_logarithm = signed_logarithm / math.log1p(
-            MAX_PRODUCT_COEFFICIENT,
+    def _decode_bits(self, state: Tensor) -> Tensor:
+        bit_positions = torch.linspace(
+            0.0,
+            1.0,
+            MAX_VALUE_BITS,
+            device=state.device,
+            dtype=state.dtype,
         )
-        return torch.stack(
+        query_features = torch.stack(
             (
-                residual / residual_scale,
-                signed_logarithm,
-                square / residual_scale,
-                modulus / 9.0,
-                quotient / 9.0,
-                positions,
-                torch.sin(2.0 * math.pi * positions),
-                torch.cos(2.0 * math.pi * positions),
+                bit_positions,
+                torch.sin(2.0 * math.pi * bit_positions),
+                torch.cos(2.0 * math.pi * bit_positions),
+                torch.sin(4.0 * math.pi * bit_positions),
+                torch.cos(4.0 * math.pi * bit_positions),
             ),
             dim=-1,
         )
+        queries = self.bit_query_projection(query_features)
+        keys = self.bit_key(state)
+        scores = torch.einsum("qc,blc->bql", queries, keys)
+        scores = scores / math.sqrt(WIDTH)
+        weights = F.softmax(scores, dim=-1)
+        values = self.bit_value(state)
+        pooled = torch.einsum("bql,blc->bqc", weights, values)
+        return self.bit_head(pooled).squeeze(-1)
 
 
-class DigitwiseSquaringModel(nn.Module):
-    """Compose a learned decimal long-division transition in latent space."""
+class HardSemanticModel(nn.Module):
+    """Compose hard decimal residue states through one tied transition."""
 
     def __init__(self, spec: ModelSpec) -> None:
         super().__init__()
         self.config = Config(spec.vocab_size, spec.max_seq_len)
-        self.transition = LearnedLongDivision()
+        self.transition = SemanticSquaringTransition()
         self.special_logits = nn.Parameter(torch.empty(DIGIT_OFFSET))
         coefficient_map = torch.zeros(
             MAX_DECIMAL_DIGITS,
@@ -370,8 +357,13 @@ class DigitwiseSquaringModel(nn.Module):
         residue_logits = torch.log(
             residue_probabilities * 0.99 + 0.001,
         )
-        quotient_logits = torch.zeros_like(residue_logits)
-        positions = torch.linspace(
+        binary_logits = torch.zeros(
+            input_ids.shape[0],
+            MAX_VALUE_BITS,
+            device=input_ids.device,
+            dtype=modulus_digits.dtype,
+        )
+        product_positions = torch.linspace(
             0.0,
             1.0,
             PRODUCT_DIGITS,
@@ -387,23 +379,30 @@ class DigitwiseSquaringModel(nn.Module):
             ).squeeze(-1)
             if active_indices.numel() == 0:
                 continue
-            proposal_logits, proposed_quotient = self.transition(
+            proposal_logits, proposed_bits = self.transition(
                 residue_probabilities[active_indices],
                 modulus_digits[active_indices],
                 self.coefficient_map,
-                positions[active_indices],
+                product_positions[active_indices],
             )
             residue_logits = residue_logits.index_copy(
                 0,
                 active_indices,
                 proposal_logits,
             )
-            quotient_logits = quotient_logits.index_copy(
+            binary_logits = binary_logits.index_copy(
                 0,
                 active_indices,
-                proposed_quotient,
+                proposed_bits,
             )
-            residue_probabilities = F.softmax(residue_logits, dim=-1)
+            soft_probabilities = F.softmax(residue_logits, dim=-1)
+            hard_probabilities = F.one_hot(
+                soft_probabilities.argmax(dim=-1),
+                NUM_DIGITS,
+            ).to(soft_probabilities.dtype)
+            residue_probabilities = (
+                hard_probabilities + soft_probabilities - soft_probabilities.detach()
+            )
 
         slot_logits = torch.cat(
             (
@@ -421,7 +420,7 @@ class DigitwiseSquaringModel(nn.Module):
             input_ids,
             attention_mask,
         )
-        return logits, (residue_logits, quotient_logits)
+        return logits, (residue_logits, binary_logits)
 
     def _decimal_digits(self, value: Tensor) -> Tensor:
         return (value[:, None] // self.decimal_powers) % NUM_DIGITS
@@ -591,8 +590,8 @@ class WallClockSchedule:
         self._set_multiplier(multiplier)
 
 
-def build_model(spec: ModelSpec) -> DigitwiseSquaringModel:
-    model = DigitwiseSquaringModel(spec)
+def build_model(spec: ModelSpec) -> HardSemanticModel:
+    model = HardSemanticModel(spec)
     assert_model_state(model, spec)
     return model
 
@@ -621,9 +620,72 @@ def build_optimizer(
     return OptimizerBundle(optimizer, scheduler)
 
 
+def token_training_loss(batch: TokenLossBatch) -> Tensor:
+    token_losses = F.cross_entropy(
+        batch.logits.transpose(1, 2).float(),
+        batch.labels,
+        ignore_index=-100,
+        reduction="none",
+    )
+    target_counts = batch.valid_mask.sum(dim=1)
+    valid_rows = target_counts > 0
+    sequence_loss = (
+        (token_losses * batch.valid_mask).sum(dim=1) / target_counts.clamp_min(1)
+    )[valid_rows].mean()
+
+    target_values = torch.zeros(
+        batch.labels.shape[0],
+        device=batch.labels.device,
+        dtype=torch.long,
+    )
+    for position in range(batch.labels.shape[1]):
+        valid = batch.valid_mask[:, position]
+        digit = (batch.labels[:, position] - DIGIT_OFFSET).clamp(
+            min=0,
+            max=NUM_DIGITS - 1,
+        )
+        target_values = torch.where(
+            valid,
+            target_values * 10 + digit,
+            target_values,
+        )
+    decimal_powers = 10 ** torch.arange(
+        MAX_DECIMAL_DIGITS,
+        device=batch.labels.device,
+        dtype=torch.long,
+    )
+    target_decimal_digits = (target_values[:, None] // decimal_powers) % NUM_DIGITS
+    bit_shifts = torch.arange(
+        MAX_VALUE_BITS,
+        device=batch.labels.device,
+        dtype=torch.long,
+    )
+    target_bits = ((target_values[:, None] >> bit_shifts) & 1).float()
+
+    if not isinstance(batch.auxiliary, tuple) or len(batch.auxiliary) != 2:
+        raise TypeError("auxiliary output must contain decimal and binary logits")
+    decimal_logits, binary_logits = batch.auxiliary
+    if not isinstance(decimal_logits, Tensor) or not isinstance(binary_logits, Tensor):
+        raise TypeError("semantic logits must be tensors")
+    semantic_decimal_loss = F.cross_entropy(
+        decimal_logits.transpose(1, 2).float(),
+        target_decimal_digits,
+    )
+    semantic_binary_loss = F.binary_cross_entropy_with_logits(
+        binary_logits.float(),
+        target_bits,
+    )
+    return (
+        sequence_loss
+        + SEMANTIC_DECIMAL_WEIGHT * semantic_decimal_loss
+        + SEMANTIC_BINARY_WEIGHT * semantic_binary_loss
+    )
+
+
 SUBMISSION = Submission(
     build_model=build_model,
     build_optimizer=build_optimizer,
+    token_training_loss=token_training_loss,
     batch_size=TRAIN_BATCH_SIZE,
     eval_batch_size=EVAL_BATCH_SIZE,
     max_steps=MAX_TRAINING_STEPS,
