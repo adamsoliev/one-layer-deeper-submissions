@@ -179,3 +179,42 @@ Low invariant loss therefore did not identify the correct discrete quotient, car
 The longer Medium budgets did not rescue the representation, and M2 ended with a non-finite training loss at update 1,001, so L5 also failed the mandatory full-coverage gate.
 The counterintuitive hypothesis is rejected, no hosted quota was consumed, and the hosted-only DuckDB and README Architecture results remain unchanged.
 The next intuitive experiment should use a fully bounded binary state with one tied local gate network for multiplication, comparison, and conditional subtraction, avoiding both unbounded quotient classification and indirectly learned decimal canonicalization while keeping every bit decision learned end to end.
+
+## L6: Bounded radix-gate recurrence
+
+Date: 2026-08-02.
+
+Idea class: intuitive.
+
+Status: rejected before hosted submission.
+
+The hypothesis was that L5 failed because its decimal quotient, carry, and digit decisions were too numerous and its recurrent coefficients could become unstable, whereas a fully bounded low-radix circuit would reduce each local decision to a small reusable gate.
+The model represented each residue and modulus with twelve base-4 digits and evaluated a square by scanning the significant multiplier digits from high to low.
+At each Horner step, the candidate was at most `7N` for a valid state, so a shared network chose one of seven quotient values; a low-to-high GRU then chose bounded local carries and one of four output digits at each position.
+The selected recurrent state always remained in `{0,1,2,3}¹²`, and the same complete square transition was tied across every requested `T` step.
+Decimal outputs were decoded by a learned MLP from eight harmonics of the state's phase at each decimal place, avoiding a separate learned decimal canonicalizer.
+The custom loss combined official sequence cross entropy, a final-answer base-4 semantic loss, and the same label-free range, coefficient, overflow, and value-preservation invariants as L5.
+The final candidate removed L5's curriculum because bounded state made every update stable; a short E3 runtime check showed that immediate full supervision improved exact accuracy from 0.31% to 1.81% without changing the architecture or optimizer.
+The 21,061 persistent state elements contained no prompt or whole-value memories, residue or factor tables, numeric-range enumeration, dataset branches, T-specialized operators, solver-derived intermediate labels, or range-scaled parameters.
+
+The frozen candidate was screened with the same official datasets, splits, Apple M2 Pro device, 30-second Easy budgets, and 60-second Medium budgets as the preceding experiments.
+
+| Dataset | Updates | Test | OOD | Mean exact accuracy | Max T | OOD N Max T |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| E1 | 97 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| E2 | 87 | 0.21% | 0.00% | 0.10% | <1 | <1 |
+| E3 | 177 | 1.25% | 2.37% | 1.81% | <1 | <1 |
+| E4 | 267 | 0.44% | 0.33% | 0.39% | <1 | <1 |
+| E5 | 54 | 0.25% | 0.17% | 0.21% | <1 | <1 |
+| M1 | 45 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| M2 | 40 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| M3 | 243 | 0.50% | 0.47% | 0.48% | <1 | <1 |
+| M4 | 57 | 0.07% | 0.12% | 0.09% | <1 | <1 |
+| M5 | 49 | 0.13% | 0.20% | 0.17% | <1 | <1 |
+
+L6 eliminated L5's non-finite failure and recovered L1's E3 score, confirming that low-cardinality bounded gates are materially easier to optimize than redundant decimal decisions.
+The E3 score plateaued at exactly 1.81% between the 10-second runtime check and the 30-second screen, E4 remained below L3, and every depth profile again failed at T=1.
+The architecture also nested a significant-digit scan inside every requested square: the fixed-T=2 datasets completed 177 to 267 updates, while the deeper Medium datasets completed only 40 to 57 despite twice the local wall-clock allowance.
+The candidate therefore learned marginal output statistics rather than gate semantics, and its serial work reduced optimizer exposure precisely where deeper latent computation was needed.
+The intuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
+The next counterintuitive experiment should retain the bounded base-4 circuit but replace straight-through hard gates during training with a temperature-annealed soft relaxation, testing whether gradient mismatch rather than circuit expressivity prevented the algebraic invariants from identifying the discrete transition.
