@@ -542,3 +542,40 @@ Concentrating gradient on the least-satisfied equation therefore exposed rather 
 The failure is not explained by normalized averaging; the invariant-only, straight-through parallel quotient/carry/residue predictor does not optimize the exact discrete constraint system within the budget, even when the loss continues to signal its worst error.
 The counterintuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
 The next intuitive experiment should keep L15's discrete circuit and worst-constraint loss but add direct cross-entropy on the final radix state obtained by re-encoding only the official final answer, supplying the transition with an identifiable end-state gradient without introducing any solver-derived intermediate label.
+
+## L16: Final radix endpoint supervision
+
+Date: 2026-08-02.
+
+Idea class: intuitive.
+
+Status: rejected before hosted submission.
+
+The hypothesis was that L15's exact constraints supplied error detection but no identifiable direction toward the correct discrete quotient and residue choices, whereas the official final answer could supervise the requested endpoint directly without revealing any intermediate square.
+L16 retained L15's fully discrete quotient/carry/residue forward circuit, worst-coefficient constraint, detached Fourier decoder, optimizer, schedule, and 135,274 persistent state elements.
+The loss parsed only the official final decimal target, re-encoded that same value into base-4, and applied weight-0.75 cross-entropy to the final recurrent state's digit logits over positions significant for the input modulus.
+The decimal token loss continued to train only the detached readout, while the transition received the new endpoint loss plus its algebraic constraints.
+This used no intermediate solver label, lookup, enumeration, branch, specialized T operation, or added model state.
+
+The frozen candidate was screened with the same official datasets, splits, Apple M2 Pro device, 30-second Easy budgets, and 60-second Medium budgets as L15.
+
+| Dataset | Updates | Test | OOD | Mean exact accuracy | Max T | OOD N Max T |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| E1 | 242 | 6.00% | 10.00% | 8.00% | <1 | <1 |
+| E2 | 215 | 0.83% | 0.67% | 0.75% | <1 | <1 |
+| E3 | 604 | 1.25% | 2.37% | 1.81% | <1 | <1 |
+| E4 | 601 | 0.31% | 1.00% | 0.66% | <1 | <1 |
+| E5 | 233 | 1.33% | 1.50% | 1.42% | <1 | <1 |
+| M1 | 204 | 0.03% | 0.00% | 0.02% | <1 | <1 |
+| M2 | 197 | 0.49% | 0.66% | 0.57% | <1 | <1 |
+| M3 | 1,200 | 0.21% | 0.30% | 0.25% | <1 | <1 |
+| M4 | 406 | 0.16% | 0.19% | 0.17% | <1 | <1 |
+| M5 | 326 | 0.42% | 0.33% | 0.38% | <1 | <1 |
+
+Endpoint supervision raised fixed-modulus E2 to 0.75%, but the gain was isolated: E3 exactly returned to the recurring 1.81% split pair, E4 regressed from 0.85% to 0.66%, M3 regressed from 0.48% to 0.25%, and the other families remained at marginal counts.
+Every familiar- and unseen-modulus profile failed at T=1.
+The intended auxiliary signal remained active rather than disappearing: total final training losses were 3.48--3.94 while decimal-only evaluation losses were 2.18--2.38, leaving approximately an `ln(4)`-scale radix-and-constraint gap after hundreds to 1,200 updates.
+An identifiable final state target is therefore insufficient when its gradient must coordinate earlier hard straight-through states and a parallel quotient/carry factorization.
+The tied circuit neither fit its directly supervised endpoint reliably nor converted that signal into a reusable one-step arithmetic rule.
+The intuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
+The next counterintuitive experiment should preserve L16's forward computation and losses but detach the hard recurrent state between requested squares, truncating backpropagation through time so each tied call learns from its own algebraic constraint and the last call learns the endpoint directly instead of letting long straight-through credit corrupt earlier local transitions.
