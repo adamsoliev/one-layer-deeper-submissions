@@ -432,3 +432,40 @@ On E3, the invariant-only combined loss again fell to about 2.30 by update 100 a
 The soft-forward mismatch is therefore not sufficient to explain the degeneracy: the continuous carry field can absorb coefficient discrepancies even when quotient and residue digits are discrete, or the learned Fourier readout may conceal any improvement in the radix state.
 The intuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
 The next counterintuitive experiment should test the readout explanation directly by replacing the Fourier phase decoder with a tied learned base-4-to-decimal conversion recurrence whose local value-preservation invariant and final token loss train an explicit decimal state.
+
+## L13: Tied radix-conversion readout
+
+Date: 2026-08-02.
+
+Idea class: counterintuitive.
+
+Status: rejected before hosted submission.
+
+The hypothesis was that L12's invariant-only modular transition had learned more arithmetic than its exact scores revealed, but the direct Fourier phase readout could not convert the resulting base-4 state into a consistent decimal sequence.
+L13 retained L12's complete modular transition, hard straight-through quotient and residue gates, detached arithmetic state, optimizer, schedule, and loss weights.
+It replaced only the Fourier readout with a twelve-step conversion recurrence that consumed the base-4 state from most to least significant digit and maintained an explicit eight-digit decimal accumulator.
+At each tied step, one local block shared across dilations 1, 2, and 4 predicted decimal digits and base-4-sized carries in parallel.
+The unlabeled constraint `4 * old digit + source addend + incoming carry = new digit + 10 * outgoing carry` enforced local value preservation, while only the final decimal logits received official answer labels.
+The candidate used 192,808 persistent state elements and added no intermediate solver labels, lookup memory, range enumeration, dataset branches, T-specialized operators, or value-sized parameter tables.
+
+The frozen candidate was screened with the same official datasets, splits, Apple M2 Pro device, 30-second Easy budgets, and 60-second Medium budgets as L12.
+
+| Dataset | Updates | Test | OOD | Mean exact accuracy | Max T | OOD N Max T |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| E1 | 169 | 6.00% | 10.00% | 8.00% | <1 | <1 |
+| E2 | 168 | 2.29% | 2.00% | 2.15% | <1 | <1 |
+| E3 | 307 | 0.88% | 0.63% | 0.75% | <1 | <1 |
+| E4 | 307 | 0.19% | 0.17% | 0.18% | <1 | <1 |
+| E5 | 173 | 1.33% | 1.00% | 1.17% | <1 | <1 |
+| M1 | 179 | 0.00% | 0.07% | 0.03% | <1 | <1 |
+| M2 | 175 | 0.49% | 0.66% | 0.57% | <1 | <1 |
+| M3 | 583 | 0.21% | 0.07% | 0.14% | <1 | <1 |
+| M4 | 300 | 0.22% | 0.18% | 0.20% | <1 | <1 |
+| M5 | 249 | 0.42% | 0.33% | 0.38% | <1 | <1 |
+
+The tied converter raised E2 from 0.42% to 2.15%, but that gain was isolated: E1, E3, E4, E5, and M3 regressed; M2 and M5 exactly reproduced L12's split counts; and M4 gained only two test examples while remaining at the marginal floor.
+No familiar- or unseen-modulus profile certified even T=1.
+The combined losses fell from 12.54--40.11 initially to 2.22--2.33, but E3 completed only 307 updates versus L12's 609 and M3 completed 583 versus 1,237 because the twelve recurrent conversion steps approximately doubled the cost of shallow-T training.
+The Fourier decoder was therefore not concealing a broadly correct radix state: an explicit value-preserving conversion neither exposed target-family arithmetic nor transferred its small fixed-modulus E2 gain, and its additional serial depth starved the unchanged modular transition of updates.
+The counterintuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
+The next intuitive experiment should restore L12's faster Fourier readout and make its remaining continuous carry field discrete with hard straight-through integer rounding, eliminating the last source of fractional slack in the coefficient identities without adding a carry table or range-sized parameters.
