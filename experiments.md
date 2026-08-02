@@ -291,3 +291,40 @@ By the end of E3 training, the combined loss had fallen to 2.81, showing that th
 The physical-depth hypothesis is therefore only partly supported: parallel lookahead solved the update-throughput bottleneck, but the final-answer and algebraic constraints still did not identify the correct latent quotient and residue.
 The intuitive candidate is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
 The next counterintuitive experiment should add target-conditioned bidirectional latent consistency during training: a learned reverse transition starts from the provided final answer and meets the forward tied recurrence at an interior latent state, providing dense credit assignment from final labels without exposing solver-derived intermediate residues.
+
+## L9: Target-conditioned midpoint consistency
+
+Date: 2026-08-02.
+
+Idea class: counterintuitive.
+
+Status: rejected before hosted submission.
+
+The hypothesis was that L8's forward quotient was underidentified by a final label and coefficient invariants alone, and that a learned target-conditioned reverse process could shorten the credit-assignment path without revealing the true intermediate residue.
+L9 retained L8's complete forward architecture and training objective, and added a separate reverse transition consisting of one input projection, one local block shared across dilations 1, 2, 4, and 8, and a bounded base-4 digit head.
+The model recorded the forward state after `floor(T/2)` tied squares.
+Inside the custom training loss, the reverse transition started from the provided final-answer digits, ran for `ceil(T/2)` tied steps, and incurred a smooth latent-consistency loss against the forward midpoint.
+The evaluator still performed the only backward pass, the reverse computation remained in the autograd graph and on the accelerator, and evaluation predictions used only the original forward recurrence.
+The learned reverse state was not a solver-derived root or intermediate label: modular squaring is generally many-to-one, and the reverse network was free to select any latent preimage that agreed with the learned forward path.
+The 198,014 persistent state elements remained range-independent and contained no prompt memories, bounded residue/factor tables, numeric enumeration, dataset branches, or T-specific parameters.
+
+The frozen candidate was screened with the same official datasets, splits, Apple M2 Pro device, 30-second Easy budgets, and 60-second Medium budgets as L8.
+
+| Dataset | Updates | Test | OOD | Mean exact accuracy | Max T | OOD N Max T |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| E1 | 213 | 6.67% | 10.00% | 8.33% | <1 | <1 |
+| E2 | 205 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| E3 | 514 | 1.25% | 2.37% | 1.81% | <1 | <1 |
+| E4 | 510 | 0.37% | 1.33% | 0.85% | <1 | <1 |
+| E5 | 211 | 1.33% | 1.50% | 1.42% | <1 | <1 |
+| M1 | 167 | 0.00% | 0.07% | 0.03% | <1 | <1 |
+| M2 | 162 | 0.49% | 0.66% | 0.57% | <1 | <1 |
+| M3 | 1,018 | 0.33% | 0.43% | 0.38% | <1 | <1 |
+| M4 | 349 | 0.19% | 0.18% | 0.18% | <1 | <1 |
+| M5 | 268 | 0.42% | 0.33% | 0.38% | <1 | <1 |
+
+All five Easy exact-example counts were identical to L8, as were M1, M4, and M5; M2 recovered the recurring 0.57% marginal score and M3 changed by only a few examples.
+The reverse path reduced optimizer throughput and increased E3 held-out loss from about 2.27 to 2.28 in the full screen, while every matched and unseen-modulus profile still failed T=1.
+Learned bidirectional agreement therefore supplied an easier auxiliary objective but did not select the arithmetic forward transition; the two learned paths could agree on latent behavior without improving final exactness.
+The counterintuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
+The next intuitive experiment should return to L8's faster forward-only model and correct the final-answer objective: mask base-4 semantic supervision to modulus-significant positions so padded high zeros cannot dominate, and emphasize the weakest official output digit with a smooth sequence-level maximum.
