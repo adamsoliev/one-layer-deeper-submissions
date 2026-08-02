@@ -127,6 +127,22 @@ The Hard leaderboard ranks submissions lexicographically by `Max T`, then `OOD N
 
 ## Submission workflow
 
+Before using hosted quota, generate the official public datasets in a local checkout of the competition repository and run the complete aggregate-only screen:
+
+```bash
+cd .benchmark/official
+uv run bash scripts/generate_datasets.sh
+cd ../..
+uv run --project .benchmark/official scripts/local_screen.py \
+  --easy-seconds 30 \
+  --medium-seconds 60
+```
+
+The screening runner preserves every official Easy and Medium training, test, ordinary OOD, matched-depth, and unseen-modulus split while changing only the device, numerical dtype, worker count, and local wall-clock budget.
+It stores generated manifests, raw evaluator logs, and machine-readable aggregate results under the ignored `.benchmark/screens/` directory.
+The local budgets are rejection screens rather than estimates of hosted H100 scores, so a candidate must show broad gains across the suite before it can be frozen for remote evaluation.
+Negative hypotheses and their aggregate conclusions are recorded in `experiments.md`.
+
 Install the competition CLI, authenticate once, and install this project's dependencies:
 
 ```bash
