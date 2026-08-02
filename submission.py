@@ -1,4 +1,4 @@
-"""Discrete-carry parallel recurrence for repeated modular squaring."""
+"""Worst-constraint parallel recurrence for repeated modular squaring."""
 
 from __future__ import annotations
 
@@ -36,6 +36,7 @@ WARMUP_FRACTION = 0.05
 INVARIANT_WEIGHT = 0.5
 ENTROPY_WEIGHT = 0.002
 WEAK_DIGIT_TEMPERATURE = 0.25
+CONSTRAINT_TEMPERATURE = 0.1
 PAD_TOKEN_ID = 0
 X_TOKEN_ID = 3
 T_TOKEN_ID = 4
@@ -233,8 +234,20 @@ class ParallelRadixSquare(nn.Module):
             next_digits,
             (0, PRODUCT_DIGITS - STATE_DIGITS),
         )
-        coefficient_error = (normalized_coefficients - target_coefficients).abs() / (
-            MAX_PRODUCT_COEFFICIENT + 1.0
+        coefficient_constraints = torch.cat(
+            (
+                (normalized_coefficients - target_coefficients).abs(),
+                carries[:, -1:].abs(),
+            ),
+            dim=1,
+        )
+        constraint_magnitudes = torch.log1p(coefficient_constraints)
+        smooth_worst_constraint = CONSTRAINT_TEMPERATURE * (
+            torch.logsumexp(
+                constraint_magnitudes / CONSTRAINT_TEMPERATURE,
+                dim=1,
+            )
+            - math.log(coefficient_constraints.shape[1])
         )
         residue_value = torch.einsum(
             "bd,d->b",
@@ -251,12 +264,10 @@ class ParallelRadixSquare(nn.Module):
         above_modulus = F.relu(
             (residue_value - (modulus_value - 1.0)) / denominator,
         )
-        overflow = carries[:, -1].float() / (MAX_PRODUCT_COEFFICIENT + 1.0)
         invariant_loss = (
-            torch.log1p(coefficient_error).square().mean()
+            smooth_worst_constraint.square().mean()
             + torch.log1p(below_zero).square().mean()
             + torch.log1p(above_modulus).square().mean()
-            + overflow.square().mean()
         )
         entropy = quotient_entropy.float().mean() + residue_entropy.float().mean()
         return next_digits, residue_logits, invariant_loss, entropy

@@ -505,3 +505,40 @@ Continuous carry slack was therefore not the operative loophole: making the enti
 The remaining averaged, coefficient-normalized invariant can become negligible while discrete equations are still violated, leaving the detached decoder at its recurring label marginals.
 The intuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
 The next counterintuitive experiment should retain this fully discrete circuit but replace its mean of tiny normalized coefficient penalties with a smooth worst-constraint objective over unnormalized integer violations, forcing optimization to repair the least-satisfied positional identity rather than hiding it among 24 coefficients.
+
+## L15: Worst discrete coefficient objective
+
+Date: 2026-08-02.
+
+Idea class: counterintuitive.
+
+Status: rejected before hosted submission.
+
+The hypothesis was that L14's fully discrete circuit still failed because its invariant averaged 24 coefficient errors after division by 109, allowing a few violated positional identities to contribute almost no gradient even though exact arithmetic requires every identity to hold.
+L15 retained L14's architecture, hard straight-through quotient, integer carry, and residue decisions, detached Fourier decoder, optimizer, schedule, entropy term, and 135,274 persistent state elements.
+It changed only the algebraic objective: for each example it took a temperature-0.1 smooth maximum of `log(1 + absolute violation)` over the 24 unnormalized integer coefficient equations and the final carry, then squared that worst constraint.
+Exact coefficient satisfaction still had zero loss, but a single one-unit error could no longer disappear through coefficient averaging or large-range normalization.
+The loss added no labels, learned state, tables, branches, enumeration, or specialized computation.
+
+The frozen candidate was screened with the same official datasets, splits, Apple M2 Pro device, 30-second Easy budgets, and 60-second Medium budgets as L14.
+
+| Dataset | Updates | Test | OOD | Mean exact accuracy | Max T | OOD N Max T |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| E1 | 242 | 6.67% | 10.00% | 8.33% | <1 | <1 |
+| E2 | 220 | 0.21% | 0.00% | 0.10% | <1 | <1 |
+| E3 | 626 | 1.13% | 2.25% | 1.69% | <1 | <1 |
+| E4 | 620 | 0.37% | 1.33% | 0.85% | <1 | <1 |
+| E5 | 240 | 1.33% | 1.50% | 1.42% | <1 | <1 |
+| M1 | 204 | 0.00% | 0.07% | 0.03% | <1 | <1 |
+| M2 | 199 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| M3 | 1,235 | 0.50% | 0.47% | 0.48% | <1 | <1 |
+| M4 | 412 | 0.19% | 0.18% | 0.18% | <1 | <1 |
+| M5 | 335 | 0.42% | 0.33% | 0.38% | <1 | <1 |
+
+E3 lost one exact test and one exact OOD example relative to L14, E4 was unchanged, M2 fell from 44 test and 33 OOD examples to zero, and the remaining families either exactly reproduced L14 or moved by only one fixed-family test example.
+No familiar- or unseen-modulus profile certified T=1.
+The stronger objective did not disappear into decoder cross entropy: final combined loss remained 2.743 on E3 and 2.725 on M3, compared with about 2.30 under L14, after 626 and 1,235 updates respectively.
+Concentrating gradient on the least-satisfied equation therefore exposed rather than repaired the residual constraint violations.
+The failure is not explained by normalized averaging; the invariant-only, straight-through parallel quotient/carry/residue predictor does not optimize the exact discrete constraint system within the budget, even when the loss continues to signal its worst error.
+The counterintuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
+The next intuitive experiment should keep L15's discrete circuit and worst-constraint loss but add direct cross-entropy on the final radix state obtained by re-encoding only the official final answer, supplying the transition with an identifiable end-state gradient without introducing any solver-derived intermediate label.
