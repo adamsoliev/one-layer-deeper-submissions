@@ -33,7 +33,6 @@ MAX_TRAINING_STEPS = 1_000_000
 BASE_LEARNING_RATE = 3e-3
 MIN_LEARNING_RATE_RATIO = 0.05
 WARMUP_FRACTION = 0.05
-SEMANTIC_RADIX_WEIGHT = 0.75
 INVARIANT_WEIGHT = 0.5
 ENTROPY_WEIGHT = 0.002
 WEAK_DIGIT_TEMPERATURE = 0.25
@@ -352,7 +351,7 @@ class ParallelCarryModel(nn.Module):
         self,
         input_ids: Tensor,
         attention_mask: Tensor | None = None,
-    ) -> tuple[Tensor, tuple[Tensor, Tensor, Tensor, Tensor]]:
+    ) -> tuple[Tensor, tuple[Tensor, Tensor, Tensor]]:
         if attention_mask is None:
             attention_mask = input_ids != PAD_TOKEN_ID
         else:
@@ -401,7 +400,8 @@ class ParallelCarryModel(nn.Module):
             invariant_losses.append(invariant_loss)
             entropies.append(entropy)
 
-        decimal_logits = self._decode_decimal(state)
+        decoder_state = state.detach() if self.training else state
+        decimal_logits = self._decode_decimal(decoder_state)
         slot_logits = torch.cat(
             (
                 self.special_logits[None, None, :].expand(
@@ -424,7 +424,6 @@ class ParallelCarryModel(nn.Module):
                 state_logits,
                 torch.stack(invariant_losses).mean(),
                 torch.stack(entropies).mean(),
-                modulus_digits,
             ),
         )
 
@@ -669,62 +668,19 @@ def token_training_loss(batch: TokenLossBatch) -> Tensor:
     )
     sequence_loss = sequence_losses[valid_rows].mean()
 
-    target_values = torch.zeros(
-        batch.labels.shape[0],
-        device=batch.labels.device,
-        dtype=torch.long,
-    )
-    for position in range(batch.labels.shape[1]):
-        valid = batch.valid_mask[:, position]
-        digit = (batch.labels[:, position] - DIGIT_OFFSET).clamp(
-            min=0,
-            max=NUM_DECIMAL_DIGITS - 1,
-        )
-        target_values = torch.where(
-            valid,
-            target_values * 10 + digit,
-            target_values,
-        )
-    radix_powers = RADIX ** torch.arange(
-        STATE_DIGITS,
-        device=batch.labels.device,
-        dtype=torch.long,
-    )
-    target_radix_digits = (target_values[:, None] // radix_powers) % RADIX
-
-    if not isinstance(batch.auxiliary, tuple) or len(batch.auxiliary) != 4:
+    if not isinstance(batch.auxiliary, tuple) or len(batch.auxiliary) != 3:
         raise TypeError(
-            "auxiliary output must contain radix logits and modulus digits",
+            "auxiliary output must contain radix logits and invariant terms",
         )
-    radix_logits, invariant_loss, entropy, modulus_digits = batch.auxiliary
+    radix_logits, invariant_loss, entropy = batch.auxiliary
     if not isinstance(radix_logits, Tensor):
         raise TypeError("radix logits must be a tensor")
     if not isinstance(invariant_loss, Tensor) or invariant_loss.ndim != 0:
         raise TypeError("invariant loss must be a scalar tensor")
     if not isinstance(entropy, Tensor) or entropy.ndim != 0:
         raise TypeError("entropy must be a scalar tensor")
-    if not isinstance(modulus_digits, Tensor):
-        raise TypeError("modulus digits must be a tensor")
-    radix_losses = F.cross_entropy(
-        radix_logits.transpose(1, 2).float(),
-        target_radix_digits,
-        reduction="none",
-    )
-    nonzero_modulus = modulus_digits != 0
-    significant_mask = torch.flip(
-        torch.cumsum(
-            torch.flip(nonzero_modulus.long(), dims=(1,)),
-            dim=1,
-        ),
-        dims=(1,),
-    ).bool()
-    semantic_radix_loss = (
-        (radix_losses * significant_mask).sum(dim=1)
-        / significant_mask.sum(dim=1).clamp_min(1)
-    ).mean()
     return (
         sequence_loss
-        + SEMANTIC_RADIX_WEIGHT * semantic_radix_loss
         + INVARIANT_WEIGHT * invariant_loss.float()
         + ENTROPY_WEIGHT * entropy.float()
     )

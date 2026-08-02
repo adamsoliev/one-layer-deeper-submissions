@@ -363,3 +363,38 @@ E3 and E4 again produced exactly the same example counts as L7 through L9, despi
 Padded high zeros and weak-digit averaging therefore affected which marginal decoder solution won on some families but did not cause the arithmetic-identifiability failure.
 The intuitive loss hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
 The next counterintuitive experiment should isolate the arithmetic learner from final-label shortcuts: train the quotient, carry, and residue transition only through its algebraic coefficient invariants, detach its recurrent state before the decimal decoder, and let official labels train only the readout from that state.
+
+## L11: Label-isolated invariant transition
+
+Date: 2026-08-02.
+
+Idea class: counterintuitive.
+
+Status: rejected before hosted submission.
+
+The hypothesis was that final-label gradients encouraged L8 through L10's transition to abandon arithmetic in favor of dataset-level output marginals, even though the coefficient invariants might identify the correct modular reducer when optimized without that conflicting shortcut.
+L11 retained L10's complete forward architecture, parallel coefficient identities, annealed soft gates, hard evaluation decisions, optimizer, and smooth weakest-decimal-digit objective.
+During training, the recurrent radix state was detached before the Fourier decimal decoder, so official answer gradients updated only the readout.
+The final-answer base-4 semantic loss was removed entirely; quotient, carry, and residue parameters received gradients only from coefficient preservation, residue range, final-carry, and entropy constraints at every tied square.
+This separation used the same examples and final labels, introduced no pseudo-labels or hidden solver state, and left the 135,274 persistent state elements unchanged.
+
+The frozen candidate was screened with the same official datasets, splits, Apple M2 Pro device, 30-second Easy budgets, and 60-second Medium budgets as L8 through L10.
+
+| Dataset | Updates | Test | OOD | Mean exact accuracy | Max T | OOD N Max T |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| E1 | 254 | 6.67% | 10.00% | 8.33% | <1 | <1 |
+| E2 | 225 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| E3 | 630 | 1.25% | 2.37% | 1.81% | <1 | <1 |
+| E4 | 623 | 0.37% | 1.33% | 0.85% | <1 | <1 |
+| E5 | 253 | 1.33% | 1.50% | 1.42% | <1 | <1 |
+| M1 | 210 | 0.00% | 0.07% | 0.03% | <1 | <1 |
+| M2 | 205 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| M3 | 1,240 | 0.50% | 0.47% | 0.48% | <1 | <1 |
+| M4 | 414 | 0.19% | 0.18% | 0.18% | <1 | <1 |
+| M5 | 344 | 0.42% | 0.33% | 0.38% | <1 | <1 |
+
+On E3, the combined training loss fell from 43.37 at the first update to 2.30 by update 100 and 2.29 by the end, showing that the invariant contribution had become negligible beside decoder cross entropy.
+Despite that collapse, E1, E3, E4, E5, M1, M4, and M5 exactly matched L8's hard example counts, E2 and M2 were zero, and every T=1 profile failed.
+Final-label interference is therefore not the barrier: the continuous quotient, carry, and residue expectations admit a low-invariant solution whose annealed argmax decisions are not the corresponding arithmetic circuit.
+The counterintuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
+The next intuitive experiment should keep invariant-only transition learning but compose hard straight-through quotient and residue digits during training, making the forward computation identical to evaluation so a soft degenerate solution cannot satisfy the constraints without correct discrete decisions.
