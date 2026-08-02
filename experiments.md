@@ -469,3 +469,39 @@ The combined losses fell from 12.54--40.11 initially to 2.22--2.33, but E3 compl
 The Fourier decoder was therefore not concealing a broadly correct radix state: an explicit value-preserving conversion neither exposed target-family arithmetic nor transferred its small fixed-modulus E2 gain, and its additional serial depth starved the unchanged modular transition of updates.
 The counterintuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
 The next intuitive experiment should restore L12's faster Fourier readout and make its remaining continuous carry field discrete with hard straight-through integer rounding, eliminating the last source of fractional slack in the coefficient identities without adding a carry table or range-sized parameters.
+
+## L14: Hard integer carry field
+
+Date: 2026-08-02.
+
+Idea class: intuitive.
+
+Status: rejected before hosted submission.
+
+The hypothesis was that L12's hard quotient and residue decisions still admitted a non-arithmetic low-loss solution because its scalar carry field remained continuous and could absorb coefficient discrepancies fractionally.
+L14 restored L12's complete fast Fourier control and changed only the existing scalar carry head: both training and evaluation rounded every carry to an integer in the physical forward pass, while training used an identity straight-through gradient through that rounding operation.
+The arithmetic transition remained isolated from official labels, the quotient and residue gates remained hard straight-through choices, and the candidate retained exactly 135,274 persistent state elements.
+Integer rounding introduced no carry table, bounded value inventory, additional parameter, dataset branch, T-specialized operation, intermediate label, or range-sized state.
+
+The frozen candidate was screened with the same official datasets, splits, Apple M2 Pro device, 30-second Easy budgets, and 60-second Medium budgets as L12 and L13.
+
+| Dataset | Updates | Test | OOD | Mean exact accuracy | Max T | OOD N Max T |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| E1 | 249 | 6.67% | 10.00% | 8.33% | <1 | <1 |
+| E2 | 225 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| E3 | 609 | 1.25% | 2.37% | 1.81% | <1 | <1 |
+| E4 | 589 | 0.37% | 1.33% | 0.85% | <1 | <1 |
+| E5 | 232 | 1.33% | 1.50% | 1.42% | <1 | <1 |
+| M1 | 203 | 0.00% | 0.07% | 0.03% | <1 | <1 |
+| M2 | 197 | 0.49% | 0.66% | 0.57% | <1 | <1 |
+| M3 | 1,241 | 0.50% | 0.47% | 0.48% | <1 | <1 |
+| M4 | 411 | 0.19% | 0.18% | 0.18% | <1 | <1 |
+| M5 | 333 | 0.42% | 0.33% | 0.38% | <1 | <1 |
+
+E1, E3, E4, E5, M2, M3, M4, and M5 reproduced L12's test and OOD counts exactly, E2 regressed from four test examples to zero, and M1 gained only two OOD examples among 3,000 while retaining zero test examples.
+Every familiar- and unseen-modulus certification again failed at T=1.
+The combined final losses lay between 2.275 and 2.304, and throughput matched L12 closely, including 609 E3 updates and 1,241 M3 updates, so neither compute starvation nor numerical failure explains the identical behavior.
+Continuous carry slack was therefore not the operative loophole: making the entire quotient/carry/residue forward circuit discrete did not make the invariant-only optimizer find exact positional arithmetic.
+The remaining averaged, coefficient-normalized invariant can become negligible while discrete equations are still violated, leaving the detached decoder at its recurring label marginals.
+The intuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
+The next counterintuitive experiment should retain this fully discrete circuit but replace its mean of tiny normalized coefficient penalties with a smooth worst-constraint objective over unnormalized integer violations, forcing optimization to repair the least-satisfied positional identity rather than hiding it among 24 coefficients.

@@ -1,4 +1,4 @@
-"""Parallel modular squaring with a tied radix-conversion readout."""
+"""Discrete-carry parallel recurrence for repeated modular squaring."""
 
 from __future__ import annotations
 
@@ -23,8 +23,8 @@ PRODUCT_DIGITS = 2 * STATE_DIGITS
 OUTPUT_DIGITS = 8
 WIDTH = 64
 HIDDEN_WIDTH = 128
+FOURIER_HARMONICS = 8
 REFINEMENT_DILATIONS = (1, 2, 4, 8)
-DECIMAL_DILATIONS = (1, 2, 4)
 MAX_TRAIN_TIME_STEPS = 16
 MAX_EVAL_TIME_STEPS = 64
 TRAIN_BATCH_SIZE = 128
@@ -42,7 +42,6 @@ T_TOKEN_ID = 4
 DIGIT_OFFSET = 7
 NUM_DECIMAL_DIGITS = 10
 MAX_PRODUCT_COEFFICIENT = STATE_DIGITS * (RADIX - 1) ** 2
-MAX_DECIMAL_COEFFICIENT = 4 * (NUM_DECIMAL_DIGITS - 1) + (RADIX - 1)
 
 
 class Config:
@@ -82,6 +81,12 @@ def relaxed_choice(
     value = hard_value if hard else hard_value + soft_value - soft_value.detach()
     entropy = -(probabilities * probabilities.clamp_min(1e-8).log()).sum(dim=-1)
     return value, entropy
+
+
+def straight_through_round(value: Tensor, *, hard: bool) -> Tensor:
+    """Compose integer carries while retaining an identity gradient."""
+    rounded = value.round()
+    return rounded if hard else rounded + value - value.detach()
 
 
 class SharedDilatedBlock(nn.Module):
@@ -208,7 +213,10 @@ class ParallelRadixSquare(nn.Module):
         canonical_state = self.residual_projection(residual_features)
         for dilation in REFINEMENT_DILATIONS:
             canonical_state = self.canonical_block(canonical_state, dilation)
-        carries = self.carry_head(canonical_state).squeeze(-1)
+        carries = straight_through_round(
+            self.carry_head(canonical_state).squeeze(-1),
+            hard=hard,
+        )
         residue_logits = self.digit_head(
             canonical_state[:, :STATE_DIGITS],
         )
@@ -307,106 +315,6 @@ class ParallelRadixSquare(nn.Module):
         )
 
 
-class TiedRadixToDecimal(nn.Module):
-    """Convert a radix state through tied, value-preserving digit updates."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.input_projection = nn.Linear(7, WIDTH)
-        self.carry_block = SharedDilatedBlock()
-        self.carry_head = nn.Linear(WIDTH, RADIX)
-        self.digit_head = nn.Linear(WIDTH, NUM_DECIMAL_DIGITS)
-        self.register_buffer(
-            "carry_choices",
-            torch.arange(RADIX, dtype=torch.float32),
-        )
-        self.register_buffer(
-            "digit_choices",
-            torch.arange(NUM_DECIMAL_DIGITS, dtype=torch.float32),
-        )
-        self.register_buffer(
-            "positions",
-            torch.linspace(0.0, 1.0, OUTPUT_DIGITS),
-        )
-
-    def forward(
-        self,
-        radix_digits: Tensor,
-        temperature: float,
-        hard: bool,
-    ) -> tuple[Tensor, Tensor, Tensor]:
-        decimal_digits = radix_digits.new_zeros(
-            radix_digits.shape[0],
-            OUTPUT_DIGITS,
-        )
-        decimal_logits = decimal_digits.new_zeros(
-            radix_digits.shape[0],
-            OUTPUT_DIGITS,
-            NUM_DECIMAL_DIGITS,
-        )
-        invariant_losses: list[Tensor] = []
-        entropies: list[Tensor] = []
-        positions = self.positions.to(radix_digits.dtype)[None, :].expand(
-            radix_digits.shape[0],
-            -1,
-        )
-
-        for source_index in range(STATE_DIGITS - 1, -1, -1):
-            source_addend = decimal_digits.new_zeros(decimal_digits.shape)
-            source_addend[:, 0] = radix_digits[:, source_index]
-            raw_coefficients = 4.0 * decimal_digits + source_addend
-            features = torch.stack(
-                (
-                    decimal_digits / (NUM_DECIMAL_DIGITS - 1),
-                    raw_coefficients / MAX_DECIMAL_COEFFICIENT,
-                    source_addend / (RADIX - 1),
-                    (positions == 0).to(radix_digits.dtype),
-                    positions,
-                    torch.sin(2.0 * math.pi * positions),
-                    torch.cos(2.0 * math.pi * positions),
-                ),
-                dim=-1,
-            )
-            hidden = self.input_projection(features)
-            for dilation in DECIMAL_DILATIONS:
-                hidden = self.carry_block(hidden, dilation)
-
-            carry_logits = self.carry_head(hidden)
-            carries, carry_entropy = relaxed_choice(
-                carry_logits,
-                self.carry_choices.to(carry_logits.dtype),
-                temperature,
-                hard=hard,
-            )
-            decimal_logits = self.digit_head(hidden)
-            next_digits, digit_entropy = relaxed_choice(
-                decimal_logits,
-                self.digit_choices.to(decimal_logits.dtype),
-                temperature,
-                hard=hard,
-            )
-            incoming_carries = F.pad(carries[:, :-1], (1, 0))
-            preserved_value = (
-                raw_coefficients + incoming_carries - 10.0 * carries - next_digits
-            )
-            coefficient_error = preserved_value.abs() / (MAX_DECIMAL_COEFFICIENT + 1.0)
-            overflow = carries[:, -1] / RADIX
-            invariant_losses.append(
-                torch.log1p(coefficient_error).square().mean()
-                + overflow.float().square().mean(),
-            )
-            entropies.append(
-                carry_entropy.float().mean() + digit_entropy.float().mean(),
-            )
-            decimal_digits = next_digits
-
-        return (
-            decimal_logits,
-            torch.stack(invariant_losses).mean(),
-            torch.stack(entropies).mean(),
-        )
-
-
 class ParallelCarryModel(nn.Module):
     """Compose one parallel learned radix circuit per requested square."""
 
@@ -414,12 +322,30 @@ class ParallelCarryModel(nn.Module):
         super().__init__()
         self.config = Config(spec.vocab_size, spec.max_seq_len)
         self.transition = ParallelRadixSquare()
-        self.decimal_decoder = TiedRadixToDecimal()
+        self.decimal_decoder = nn.Sequential(
+            nn.Linear(2 * FOURIER_HARMONICS, WIDTH),
+            nn.SiLU(),
+            nn.Linear(WIDTH, WIDTH),
+            nn.SiLU(),
+            nn.Linear(WIDTH, NUM_DECIMAL_DIGITS),
+        )
         self.special_logits = nn.Parameter(torch.empty(DIGIT_OFFSET))
         self.gate_temperature = 2.0
         self.register_buffer(
             "radix_powers",
             RADIX ** torch.arange(STATE_DIGITS, dtype=torch.long),
+        )
+        self.register_buffer(
+            "radix_powers_float",
+            RADIX ** torch.arange(STATE_DIGITS, dtype=torch.float32),
+        )
+        self.register_buffer(
+            "decimal_place_scales",
+            10.0 ** torch.arange(1, OUTPUT_DIGITS + 1, dtype=torch.float32),
+        )
+        self.register_buffer(
+            "fourier_indices",
+            torch.arange(1, FOURIER_HARMONICS + 1, dtype=torch.float32),
         )
         self.apply(self._initialize)
         nn.init.normal_(self.special_logits, mean=-0.1, std=0.02)
@@ -485,11 +411,7 @@ class ParallelCarryModel(nn.Module):
             entropies.append(entropy)
 
         decoder_state = state.detach() if self.training else state
-        decimal_logits, decoder_invariant, decoder_entropy = self.decimal_decoder(
-            decoder_state,
-            self.gate_temperature,
-            not self.training,
-        )
+        decimal_logits = self._decode_decimal(decoder_state)
         slot_logits = torch.cat(
             (
                 self.special_logits[None, None, :].expand(
@@ -510,10 +432,26 @@ class ParallelCarryModel(nn.Module):
             logits,
             (
                 state_logits,
-                torch.stack(invariant_losses).mean() + decoder_invariant,
-                torch.stack(entropies).mean() + decoder_entropy,
+                torch.stack(invariant_losses).mean(),
+                torch.stack(entropies).mean(),
             ),
         )
+
+    def _decode_decimal(self, state: Tensor) -> Tensor:
+        state_value = torch.einsum(
+            "bd,d->b",
+            state.float(),
+            self.radix_powers_float,
+        )
+        phase = (
+            2.0
+            * math.pi
+            * state_value[:, None, None]
+            * self.fourier_indices[None, None, :]
+            / self.decimal_place_scales[None, :, None]
+        )
+        features = torch.cat((torch.sin(phase), torch.cos(phase)), dim=-1)
+        return self.decimal_decoder(features.to(state.dtype))
 
     def _radix_digits(self, value: Tensor) -> Tensor:
         return (value[:, None] // self.radix_powers) % RADIX
