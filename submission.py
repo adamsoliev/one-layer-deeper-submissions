@@ -71,13 +71,14 @@ def relaxed_choice(
     *,
     hard: bool,
 ) -> tuple[Tensor, Tensor]:
-    """Train an annealed expectation and evaluate its discrete argmax."""
+    """Compose discrete values while differentiating through expectations."""
     probabilities = F.softmax(
         logits.float() / max(temperature, 0.05),
         dim=-1,
     ).to(logits.dtype)
     soft_value = torch.einsum("...k,k->...", probabilities, choices)
-    value = choices[probabilities.argmax(dim=-1)] if hard else soft_value
+    hard_value = choices[probabilities.argmax(dim=-1)]
+    value = hard_value if hard else hard_value + soft_value - soft_value.detach()
     entropy = -(probabilities * probabilities.clamp_min(1e-8).log()).sum(dim=-1)
     return value, entropy
 

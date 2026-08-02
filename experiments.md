@@ -398,3 +398,37 @@ Despite that collapse, E1, E3, E4, E5, M1, M4, and M5 exactly matched L8's hard 
 Final-label interference is therefore not the barrier: the continuous quotient, carry, and residue expectations admit a low-invariant solution whose annealed argmax decisions are not the corresponding arithmetic circuit.
 The counterintuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
 The next intuitive experiment should keep invariant-only transition learning but compose hard straight-through quotient and residue digits during training, making the forward computation identical to evaluation so a soft degenerate solution cannot satisfy the constraints without correct discrete decisions.
+
+## L12: Hard invariant-only transition
+
+Date: 2026-08-02.
+
+Idea class: intuitive.
+
+Status: rejected before hosted submission.
+
+The hypothesis was that L11's algebraic constraints were sufficient in principle but were satisfied by fractional quotient and residue expectations that did not correspond to the hard argmax circuit used at evaluation.
+L12 retained L11's parallel architecture, detached decoder, invariant-only transition gradients, entropy regularization, optimizer, and temperature schedule.
+During training, every quotient and residue gate composed its hard argmax value exactly as evaluation did, while a straight-through estimator supplied gradients through the temperature-scaled categorical expectation.
+This made the physical forward computation identical in training and evaluation without adding labels, memories, tables, branches, specialized operators, or state elements.
+
+The frozen candidate was screened with the same official datasets, splits, Apple M2 Pro device, 30-second Easy budgets, and 60-second Medium budgets as L11.
+
+| Dataset | Updates | Test | OOD | Mean exact accuracy | Max T | OOD N Max T |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| E1 | 240 | 6.67% | 10.00% | 8.33% | <1 | <1 |
+| E2 | 214 | 0.83% | 0.00% | 0.42% | <1 | <1 |
+| E3 | 609 | 1.25% | 2.37% | 1.81% | <1 | <1 |
+| E4 | 606 | 0.37% | 1.33% | 0.85% | <1 | <1 |
+| E5 | 220 | 1.33% | 1.50% | 1.42% | <1 | <1 |
+| M1 | 195 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| M2 | 215 | 0.49% | 0.66% | 0.57% | <1 | <1 |
+| M3 | 1,237 | 0.50% | 0.47% | 0.48% | <1 | <1 |
+| M4 | 406 | 0.19% | 0.18% | 0.18% | <1 | <1 |
+| M5 | 368 | 0.42% | 0.33% | 0.38% | <1 | <1 |
+
+Hard training gates improved E2 to the best valid local result for that dataset, but E1, E3, E4, E5, M2, M3, M4, and M5 remained at recurring marginal modes and M1 regressed to zero.
+On E3, the invariant-only combined loss again fell to about 2.30 by update 100 and stayed there through update 609 without changing a single held-out exact example.
+The soft-forward mismatch is therefore not sufficient to explain the degeneracy: the continuous carry field can absorb coefficient discrepancies even when quotient and residue digits are discrete, or the learned Fourier readout may conceal any improvement in the radix state.
+The intuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
+The next counterintuitive experiment should test the readout explanation directly by replacing the Fourier phase decoder with a tied learned base-4-to-decimal conversion recurrence whose local value-preservation invariant and final token loss train an explicit decimal state.
