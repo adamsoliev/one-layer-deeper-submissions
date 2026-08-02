@@ -1,4 +1,4 @@
-"""Hard semantic refinement recurrence for repeated modular squaring."""
+"""Bidirectional digit-scan recurrence for repeated modular squaring."""
 
 from __future__ import annotations
 
@@ -19,12 +19,9 @@ from torch import Tensor, nn
 
 WIDTH = 64
 HIDDEN_WIDTH = 160
-NUM_HEADS = 4
 MAX_DECIMAL_DIGITS = 8
 MAX_VALUE_BITS = 24
 PRODUCT_DIGITS = 2 * MAX_DECIMAL_DIGITS
-MIN_REFINEMENT_STEPS = 2
-MAX_REFINEMENT_STEPS = 6
 MAX_TRAIN_TIME_STEPS = 16
 MAX_EVAL_TIME_STEPS = 64
 TRAIN_BATCH_SIZE = 128
@@ -35,6 +32,7 @@ MIN_LEARNING_RATE_RATIO = 0.05
 WARMUP_FRACTION = 0.05
 SEMANTIC_DECIMAL_WEIGHT = 0.5
 SEMANTIC_BINARY_WEIGHT = 0.25
+STATE_ENTROPY_WEIGHT = 0.01
 PAD_TOKEN_ID = 0
 X_TOKEN_ID = 3
 T_TOKEN_ID = 4
@@ -63,90 +61,21 @@ class RMSNorm(nn.Module):
         )
 
 
-class SemanticRefinement(nn.Module):
-    """Share local carry flow and global modulus interaction."""
+class BidirectionalDigitScan(nn.Module):
+    """Sweep multiplication carry upward and reduction state downward."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.feature_norm = RMSNorm(4 * WIDTH)
-        self.query = nn.Linear(4 * WIDTH, WIDTH, bias=False)
-        self.key = nn.Linear(4 * WIDTH, WIDTH, bias=False)
-        self.value = nn.Linear(4 * WIDTH, WIDTH, bias=False)
-        self.attention_out = nn.Linear(WIDTH, WIDTH, bias=False)
-        self.local = nn.Conv1d(WIDTH, WIDTH, kernel_size=3, padding=1)
-        self.hidden_left = nn.Linear(4 * WIDTH, HIDDEN_WIDTH)
-        self.hidden_right = nn.Linear(4 * WIDTH, HIDDEN_WIDTH)
-        self.hidden_out = nn.Linear(HIDDEN_WIDTH, WIDTH)
-        self.gate = nn.Linear(4 * WIDTH, WIDTH)
+        self.cell_projection = nn.Linear(8, WIDTH)
+        self.context_projection = nn.Linear(5, WIDTH)
+        self.carry_scan = nn.GRU(WIDTH, WIDTH, batch_first=True)
+        self.reduction_input = nn.Linear(3 * WIDTH, WIDTH)
+        self.reduction_scan = nn.GRU(WIDTH, WIDTH, batch_first=True)
+        self.fusion_norm = RMSNorm(3 * WIDTH)
+        self.fusion_left = nn.Linear(3 * WIDTH, HIDDEN_WIDTH)
+        self.fusion_right = nn.Linear(3 * WIDTH, HIDDEN_WIDTH)
+        self.fusion_out = nn.Linear(HIDDEN_WIDTH, WIDTH)
         self.output_norm = RMSNorm(WIDTH)
-
-    def forward(self, state: Tensor, context: Tensor) -> Tensor:
-        features = self.feature_norm(
-            torch.cat(
-                (
-                    state,
-                    context,
-                    state * context,
-                    state - context,
-                ),
-                dim=-1,
-            ),
-        )
-        batch_size, cells, _ = state.shape
-        head_width = WIDTH // NUM_HEADS
-        query = (
-            self.query(features)
-            .view(
-                batch_size,
-                cells,
-                NUM_HEADS,
-                head_width,
-            )
-            .transpose(1, 2)
-        )
-        key = (
-            self.key(features)
-            .view(
-                batch_size,
-                cells,
-                NUM_HEADS,
-                head_width,
-            )
-            .transpose(1, 2)
-        )
-        value = (
-            self.value(features)
-            .view(
-                batch_size,
-                cells,
-                NUM_HEADS,
-                head_width,
-            )
-            .transpose(1, 2)
-        )
-        attention = F.scaled_dot_product_attention(query, key, value)
-        attention = attention.transpose(1, 2).reshape(
-            batch_size,
-            cells,
-            WIDTH,
-        )
-        local = self.local(state.transpose(1, 2)).transpose(1, 2)
-        hidden = F.silu(self.hidden_left(features)) * torch.tanh(
-            self.hidden_right(features),
-        )
-        update = self.attention_out(attention) + local + self.hidden_out(hidden)
-        gate = torch.sigmoid(self.gate(features))
-        return self.output_norm(state + 0.25 * gate * update)
-
-
-class SemanticSquaringTransition(nn.Module):
-    """Refine product coefficients directly into semantic residue digits."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.product_projection = nn.Linear(8, WIDTH)
-        self.modulus_projection = nn.Linear(6, WIDTH)
-        self.refinement = SemanticRefinement()
         self.residue_head = nn.Linear(WIDTH, NUM_DIGITS)
         self.bit_query_projection = nn.Linear(5, WIDTH)
         self.bit_key = nn.Linear(WIDTH, WIDTH, bias=False)
@@ -184,48 +113,50 @@ class SemanticSquaringTransition(nn.Module):
             modulus_digits,
             (0, PRODUCT_DIGITS - MAX_DECIMAL_DIGITS),
         )
-        product_features = self._product_features(
+        cell_features = self._cell_features(
             product_coefficients,
             extended_residue,
             extended_modulus,
             product_positions,
         )
-        modulus_features = self._modulus_features(
+        context_features = self._context_features(
             extended_residue,
             extended_modulus,
             product_positions,
         )
-        state = self.product_projection(product_features)
-        context = self.modulus_projection(modulus_features)
-        if self.training:
-            refinement_depth = torch.randint(
-                MIN_REFINEMENT_STEPS,
-                MAX_REFINEMENT_STEPS + 1,
-                (state.shape[0],),
-                device=state.device,
-            )
-        else:
-            refinement_depth = torch.full(
-                (state.shape[0],),
-                MAX_REFINEMENT_STEPS,
-                device=state.device,
-                dtype=torch.long,
-            )
-        for step in range(MAX_REFINEMENT_STEPS):
-            proposal = self.refinement(state, context)
-            state = torch.where(
-                (refinement_depth > step)[:, None, None],
-                proposal,
-                state,
-            )
-        residue_logits = self.residue_head(
-            state[:, :MAX_DECIMAL_DIGITS],
+        cells = self.cell_projection(cell_features)
+        context = self.context_projection(context_features)
+
+        carry_initial = context.mean(dim=1, keepdim=False)[None, :, :]
+        carry_states, _ = self.carry_scan(
+            cells + context,
+            carry_initial,
         )
-        binary_logits = self._decode_bits(state)
+        reduction_inputs = self.reduction_input(
+            torch.cat((cells, context, carry_states), dim=-1),
+        )
+        reduction_initial = (carry_states[:, -1] + context[:, -1])[None, :, :]
+        reversed_reduction, _ = self.reduction_scan(
+            torch.flip(reduction_inputs, dims=(1,)),
+            reduction_initial,
+        )
+        reduction_states = torch.flip(reversed_reduction, dims=(1,))
+
+        fused_features = self.fusion_norm(
+            torch.cat((cells, carry_states, reduction_states), dim=-1),
+        )
+        hidden = F.silu(self.fusion_left(fused_features)) * torch.tanh(
+            self.fusion_right(fused_features),
+        )
+        fused = self.output_norm(cells + self.fusion_out(hidden))
+        residue_logits = self.residue_head(
+            fused[:, :MAX_DECIMAL_DIGITS],
+        )
+        binary_logits = self._decode_bits(fused)
         return residue_logits, binary_logits
 
     @staticmethod
-    def _product_features(
+    def _cell_features(
         coefficients: Tensor,
         residue: Tensor,
         modulus: Tensor,
@@ -252,7 +183,7 @@ class SemanticSquaringTransition(nn.Module):
         )
 
     @staticmethod
-    def _modulus_features(
+    def _context_features(
         residue: Tensor,
         modulus: Tensor,
         positions: Tensor,
@@ -263,7 +194,6 @@ class SemanticSquaringTransition(nn.Module):
             (
                 residue,
                 modulus,
-                residue * modulus,
                 positions,
                 torch.sin(2.0 * math.pi * positions),
                 torch.cos(2.0 * math.pi * positions),
@@ -299,13 +229,13 @@ class SemanticSquaringTransition(nn.Module):
         return self.bit_head(pooled).squeeze(-1)
 
 
-class HardSemanticModel(nn.Module):
-    """Compose hard decimal residue states through one tied transition."""
+class DigitScanModel(nn.Module):
+    """Compose soft semantic residues through one tied directional scan."""
 
     def __init__(self, spec: ModelSpec) -> None:
         super().__init__()
         self.config = Config(spec.vocab_size, spec.max_seq_len)
-        self.transition = SemanticSquaringTransition()
+        self.transition = BidirectionalDigitScan()
         self.special_logits = nn.Parameter(torch.empty(DIGIT_OFFSET))
         coefficient_map = torch.zeros(
             MAX_DECIMAL_DIGITS,
@@ -327,16 +257,18 @@ class HardSemanticModel(nn.Module):
 
     @staticmethod
     def _initialize(module: nn.Module) -> None:
-        if isinstance(module, (nn.Linear, nn.Conv1d)):
-            nn.init.normal_(module.weight, mean=0.0, std=0.02)
-        if isinstance(module, (nn.Linear, nn.Conv1d)) and module.bias is not None:
-            nn.init.zeros_(module.bias)
+        if isinstance(module, (nn.Linear, nn.GRU)):
+            for name, parameter in module.named_parameters(recurse=False):
+                if "weight" in name:
+                    nn.init.normal_(parameter, mean=0.0, std=0.02)
+                elif "bias" in name:
+                    nn.init.zeros_(parameter)
 
     def forward(
         self,
         input_ids: Tensor,
         attention_mask: Tensor | None = None,
-    ) -> tuple[Tensor, tuple[Tensor, Tensor]]:
+    ) -> tuple[Tensor, tuple[Tensor, Tensor, Tensor]]:
         if attention_mask is None:
             attention_mask = input_ids != PAD_TOKEN_ID
         else:
@@ -347,7 +279,7 @@ class HardSemanticModel(nn.Module):
             attention_mask,
         )
         modulus_digits = self._decimal_digits(modulus).to(
-            self.transition.product_projection.weight.dtype,
+            self.transition.cell_projection.weight.dtype,
         )
         residue_digits = self._decimal_digits(residue)
         residue_probabilities = F.one_hot(
@@ -370,6 +302,7 @@ class HardSemanticModel(nn.Module):
             device=input_ids.device,
             dtype=modulus_digits.dtype,
         )[None, :].expand(input_ids.shape[0], -1)
+        state_entropies: list[Tensor] = []
 
         maximum_steps = MAX_TRAIN_TIME_STEPS if self.training else MAX_EVAL_TIME_STEPS
         for step in range(maximum_steps):
@@ -395,13 +328,12 @@ class HardSemanticModel(nn.Module):
                 active_indices,
                 proposed_bits,
             )
-            soft_probabilities = F.softmax(residue_logits, dim=-1)
-            hard_probabilities = F.one_hot(
-                soft_probabilities.argmax(dim=-1),
-                NUM_DIGITS,
-            ).to(soft_probabilities.dtype)
-            residue_probabilities = (
-                hard_probabilities + soft_probabilities - soft_probabilities.detach()
+            residue_probabilities = F.softmax(residue_logits, dim=-1)
+            active_probabilities = residue_probabilities[active_indices]
+            state_entropies.append(
+                -(active_probabilities * active_probabilities.clamp_min(1e-8).log())
+                .sum(dim=-1)
+                .mean(),
             )
 
         slot_logits = torch.cat(
@@ -420,7 +352,8 @@ class HardSemanticModel(nn.Module):
             input_ids,
             attention_mask,
         )
-        return logits, (residue_logits, binary_logits)
+        state_entropy = torch.stack(state_entropies).mean()
+        return logits, (residue_logits, binary_logits, state_entropy)
 
     def _decimal_digits(self, value: Tensor) -> Tensor:
         return (value[:, None] // self.decimal_powers) % NUM_DIGITS
@@ -590,8 +523,8 @@ class WallClockSchedule:
         self._set_multiplier(multiplier)
 
 
-def build_model(spec: ModelSpec) -> HardSemanticModel:
-    model = HardSemanticModel(spec)
+def build_model(spec: ModelSpec) -> DigitScanModel:
+    model = DigitScanModel(spec)
     assert_model_state(model, spec)
     return model
 
@@ -662,11 +595,15 @@ def token_training_loss(batch: TokenLossBatch) -> Tensor:
     )
     target_bits = ((target_values[:, None] >> bit_shifts) & 1).float()
 
-    if not isinstance(batch.auxiliary, tuple) or len(batch.auxiliary) != 2:
-        raise TypeError("auxiliary output must contain decimal and binary logits")
-    decimal_logits, binary_logits = batch.auxiliary
+    if not isinstance(batch.auxiliary, tuple) or len(batch.auxiliary) != 3:
+        raise TypeError(
+            "auxiliary output must contain decimal logits, binary logits, and entropy",
+        )
+    decimal_logits, binary_logits, state_entropy = batch.auxiliary
     if not isinstance(decimal_logits, Tensor) or not isinstance(binary_logits, Tensor):
         raise TypeError("semantic logits must be tensors")
+    if not isinstance(state_entropy, Tensor) or state_entropy.ndim != 0:
+        raise TypeError("state entropy must be a scalar tensor")
     semantic_decimal_loss = F.cross_entropy(
         decimal_logits.transpose(1, 2).float(),
         target_decimal_digits,
@@ -679,6 +616,7 @@ def token_training_loss(batch: TokenLossBatch) -> Tensor:
         sequence_loss
         + SEMANTIC_DECIMAL_WEIGHT * semantic_decimal_loss
         + SEMANTIC_BINARY_WEIGHT * semantic_binary_loss
+        + STATE_ENTROPY_WEIGHT * state_entropy
     )
 
 

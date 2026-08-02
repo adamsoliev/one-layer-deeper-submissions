@@ -106,3 +106,37 @@ The gains remained small, E2 did not improve over L2, E5 and M5 regressed, M2 re
 Hundreds of fixed-T updates therefore optimized useful output statistics without producing a correct single modular-square transition, while randomized physical refinement did not make the hard latent state stable under composition.
 The counterintuitive hypothesis is rejected, and no hosted E3 or E4 quota was consumed.
 The next intuitive experiment should replace global refinement with a shared bidirectional digit-scan transducer whose recurrent carry state explicitly follows the low-to-high multiplication and high-to-low reduction directions while retaining final-state semantic supervision.
+
+## L4: Bidirectional digit-scan recurrence
+
+Date: 2026-08-02.
+
+Idea class: intuitive.
+
+Status: rejected before hosted submission.
+
+The hypothesis was that L3 failed because attention over unordered coefficient cells did not encode the opposing traversal directions needed for arithmetic: multiplication carries move from low to high digits, while reduction decisions depend on high-to-low comparisons.
+The model formed exact pairwise decimal product coefficients from soft residue digits, passed them through a shared low-to-high GRU carry scan, passed the reversed sequence through a shared high-to-low GRU reduction scan, and fused the two streams into the next soft residue.
+The same transition was tied across every requested squaring step, and only active batch rows were evaluated at each step, so computation scaled with requested depth while persistent state remained independent of the largest input integer and `T`.
+Training retained L3's final-answer decimal and binary semantic losses, but removed the straight-through discretization and randomized physical refinement depth to isolate the effect of explicit scan direction.
+The 145,882 persistent state elements contained no whole-value embeddings, prompt keys, residue or factor tables, enumerated numeric ranges, dataset branches, T-specific operators, or solver-derived intermediate labels.
+
+The frozen candidate was screened with the same official datasets, splits, Apple M2 Pro device, 30-second Easy budgets, and 60-second Medium budgets as L1 through L3.
+
+| Dataset | Updates | Test | OOD | Mean exact accuracy | Max T | OOD N Max T |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| E1 | 232 | 6.00% | 10.00% | 8.00% | <1 | <1 |
+| E2 | 201 | 1.88% | 1.00% | 1.44% | <1 | <1 |
+| E3 | 699 | 0.50% | 2.25% | 1.38% | <1 | <1 |
+| E4 | 683 | 0.06% | 0.08% | 0.07% | <1 | <1 |
+| E5 | 222 | 0.58% | 0.00% | 0.29% | <1 | <1 |
+| M1 | 185 | 0.00% | 0.07% | 0.03% | <1 | <1 |
+| M2 | 187 | 0.49% | 0.66% | 0.57% | <1 | <1 |
+| M3 | 1,386 | 0.46% | 0.40% | 0.43% | <1 | <1 |
+| M4 | 465 | 0.19% | 0.18% | 0.18% | <1 | <1 |
+| M5 | 287 | 0.17% | 0.03% | 0.10% | <1 | <1 |
+
+The directional recurrence matched L3 on E1, E2, M1, M4, and M5 within sampling resolution, modestly recovered M2 and M3, and regressed sharply on the target tasks: E3 fell from 1.94% to 1.38% and E4 from 1.00% to 0.07%.
+Every depth profile again failed to certify even T=1, so exposing traversal order increased update throughput without teaching a correct modular-square transition.
+The intuitive hypothesis is rejected, no hosted E3 or E4 quota was consumed, and neither the hosted-only DuckDB records nor the README Architecture results table was changed.
+The next counterintuitive experiment should test a redundant signed-digit latent state, whose local carry-free product representation may be easier to compose than canonical decimal digits, while retaining final-answer-only supervision and a range-independent tied transition.
