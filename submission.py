@@ -36,7 +36,7 @@ WARMUP_FRACTION = 0.05
 SEMANTIC_RADIX_WEIGHT = 0.75
 INVARIANT_WEIGHT = 0.5
 ENTROPY_WEIGHT = 0.002
-CONSISTENCY_WEIGHT = 0.5
+WEAK_DIGIT_TEMPERATURE = 0.25
 PAD_TOKEN_ID = 0
 X_TOKEN_ID = 3
 T_TOKEN_ID = 4
@@ -306,57 +306,6 @@ class ParallelRadixSquare(nn.Module):
         )
 
 
-class ReverseRadixTransition(nn.Module):
-    """Move a final-answer state toward an earlier latent preimage."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.input_projection = nn.Linear(6, WIDTH)
-        self.block = SharedDilatedBlock()
-        self.digit_head = nn.Linear(WIDTH, RADIX)
-        self.register_buffer(
-            "digit_choices",
-            torch.arange(RADIX, dtype=torch.float32),
-        )
-        positions = torch.linspace(0.0, 1.0, STATE_DIGITS)
-        self.register_buffer("positions", positions)
-
-    def forward(
-        self,
-        state: Tensor,
-        modulus: Tensor,
-        temperature: float,
-    ) -> Tensor:
-        positions = self.positions.to(state.dtype)[None, :].expand(
-            state.shape[0],
-            -1,
-        )
-        normalized_state = state / (RADIX - 1)
-        normalized_modulus = modulus / (RADIX - 1)
-        features = torch.stack(
-            (
-                normalized_state,
-                normalized_modulus,
-                normalized_state * normalized_modulus,
-                positions,
-                torch.sin(2.0 * math.pi * positions),
-                torch.cos(2.0 * math.pi * positions),
-            ),
-            dim=-1,
-        )
-        hidden = self.input_projection(features)
-        for dilation in REFINEMENT_DILATIONS:
-            hidden = self.block(hidden, dilation)
-        logits = self.digit_head(hidden)
-        next_state, _ = relaxed_choice(
-            logits,
-            self.digit_choices.to(logits.dtype),
-            temperature,
-            hard=False,
-        )
-        return next_state
-
-
 class ParallelCarryModel(nn.Module):
     """Compose one parallel learned radix circuit per requested square."""
 
@@ -364,7 +313,6 @@ class ParallelCarryModel(nn.Module):
         super().__init__()
         self.config = Config(spec.vocab_size, spec.max_seq_len)
         self.transition = ParallelRadixSquare()
-        self.reverse_transition = ReverseRadixTransition()
         self.decimal_decoder = nn.Sequential(
             nn.Linear(2 * FOURIER_HARMONICS, WIDTH),
             nn.SiLU(),
@@ -404,7 +352,7 @@ class ParallelCarryModel(nn.Module):
         self,
         input_ids: Tensor,
         attention_mask: Tensor | None = None,
-    ) -> tuple[Tensor, tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]]:
+    ) -> tuple[Tensor, tuple[Tensor, Tensor, Tensor, Tensor]]:
         if attention_mask is None:
             attention_mask = input_ids != PAD_TOKEN_ID
         else:
@@ -424,8 +372,6 @@ class ParallelCarryModel(nn.Module):
         )
         invariant_losses: list[Tensor] = []
         entropies: list[Tensor] = []
-        midpoint_steps = time_steps // 2
-        midpoint_state = state
         maximum_steps = MAX_TRAIN_TIME_STEPS if self.training else MAX_EVAL_TIME_STEPS
 
         for step in range(maximum_steps):
@@ -451,11 +397,6 @@ class ParallelCarryModel(nn.Module):
                 0,
                 active_indices,
                 proposal_logits,
-            )
-            midpoint_state = torch.where(
-                (midpoint_steps == step + 1)[:, None],
-                state,
-                midpoint_state,
             )
             invariant_losses.append(invariant_loss)
             entropies.append(entropy)
@@ -483,41 +424,8 @@ class ParallelCarryModel(nn.Module):
                 state_logits,
                 torch.stack(invariant_losses).mean(),
                 torch.stack(entropies).mean(),
-                midpoint_state,
                 modulus_digits,
-                time_steps,
             ),
-        )
-
-    def reverse_consistency_loss(
-        self,
-        target_state: Tensor,
-        midpoint_state: Tensor,
-        modulus_digits: Tensor,
-        time_steps: Tensor,
-    ) -> Tensor:
-        reverse_state = target_state.to(midpoint_state.dtype)
-        reverse_steps = time_steps - time_steps // 2
-        for step in range(MAX_TRAIN_TIME_STEPS):
-            active_indices = torch.nonzero(
-                reverse_steps > step,
-                as_tuple=False,
-            ).squeeze(-1)
-            if active_indices.numel() == 0:
-                continue
-            proposal = self.reverse_transition(
-                reverse_state[active_indices],
-                modulus_digits[active_indices],
-                self.gate_temperature,
-            )
-            reverse_state = reverse_state.index_copy(
-                0,
-                active_indices,
-                proposal,
-            )
-        return F.smooth_l1_loss(
-            reverse_state.float() / (RADIX - 1),
-            midpoint_state.float() / (RADIX - 1),
         )
 
     def _decode_decimal(self, state: Tensor) -> Tensor:
@@ -707,14 +615,9 @@ class WallClockSchedule:
         self._set_multiplier(multiplier)
 
 
-_ACTIVE_MODEL: ParallelCarryModel | None = None
-
-
 def build_model(spec: ModelSpec) -> ParallelCarryModel:
-    global _ACTIVE_MODEL
     model = ParallelCarryModel(spec)
     assert_model_state(model, spec)
-    _ACTIVE_MODEL = model
     return model
 
 
@@ -753,9 +656,18 @@ def token_training_loss(batch: TokenLossBatch) -> Tensor:
     )
     target_counts = batch.valid_mask.sum(dim=1)
     valid_rows = target_counts > 0
-    sequence_loss = (
-        (token_losses * batch.valid_mask).sum(dim=1) / target_counts.clamp_min(1)
-    )[valid_rows].mean()
+    masked_token_losses = token_losses.masked_fill(
+        ~batch.valid_mask,
+        -torch.inf,
+    )
+    sequence_losses = WEAK_DIGIT_TEMPERATURE * (
+        torch.logsumexp(
+            masked_token_losses / WEAK_DIGIT_TEMPERATURE,
+            dim=1,
+        )
+        - target_counts.clamp_min(1).float().log()
+    )
+    sequence_loss = sequence_losses[valid_rows].mean()
 
     target_values = torch.zeros(
         batch.labels.shape[0],
@@ -780,50 +692,41 @@ def token_training_loss(batch: TokenLossBatch) -> Tensor:
     )
     target_radix_digits = (target_values[:, None] // radix_powers) % RADIX
 
-    if not isinstance(batch.auxiliary, tuple) or len(batch.auxiliary) != 6:
+    if not isinstance(batch.auxiliary, tuple) or len(batch.auxiliary) != 4:
         raise TypeError(
-            "auxiliary output must contain forward and midpoint state terms",
+            "auxiliary output must contain radix logits and modulus digits",
         )
-    (
-        radix_logits,
-        invariant_loss,
-        entropy,
-        midpoint_state,
-        modulus_digits,
-        time_steps,
-    ) = batch.auxiliary
+    radix_logits, invariant_loss, entropy, modulus_digits = batch.auxiliary
     if not isinstance(radix_logits, Tensor):
         raise TypeError("radix logits must be a tensor")
     if not isinstance(invariant_loss, Tensor) or invariant_loss.ndim != 0:
         raise TypeError("invariant loss must be a scalar tensor")
     if not isinstance(entropy, Tensor) or entropy.ndim != 0:
         raise TypeError("entropy must be a scalar tensor")
-    if not all(
-        isinstance(value, Tensor)
-        for value in (midpoint_state, modulus_digits, time_steps)
-    ):
-        raise TypeError("midpoint context must contain tensors")
-    semantic_radix_loss = F.cross_entropy(
+    if not isinstance(modulus_digits, Tensor):
+        raise TypeError("modulus digits must be a tensor")
+    radix_losses = F.cross_entropy(
         radix_logits.transpose(1, 2).float(),
         target_radix_digits,
+        reduction="none",
     )
-    if _ACTIVE_MODEL is None:
-        raise RuntimeError("model was not built before the loss callback")
-    if _ACTIVE_MODEL.training:
-        consistency_loss = _ACTIVE_MODEL.reverse_consistency_loss(
-            target_radix_digits,
-            midpoint_state,
-            modulus_digits,
-            time_steps,
-        )
-    else:
-        consistency_loss = invariant_loss.new_zeros(())
+    nonzero_modulus = modulus_digits != 0
+    significant_mask = torch.flip(
+        torch.cumsum(
+            torch.flip(nonzero_modulus.long(), dims=(1,)),
+            dim=1,
+        ),
+        dims=(1,),
+    ).bool()
+    semantic_radix_loss = (
+        (radix_losses * significant_mask).sum(dim=1)
+        / significant_mask.sum(dim=1).clamp_min(1)
+    ).mean()
     return (
         sequence_loss
         + SEMANTIC_RADIX_WEIGHT * semantic_radix_loss
         + INVARIANT_WEIGHT * invariant_loss.float()
         + ENTROPY_WEIGHT * entropy.float()
-        + CONSISTENCY_WEIGHT * consistency_loss
     )
 
 

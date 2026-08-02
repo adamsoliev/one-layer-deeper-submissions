@@ -328,3 +328,38 @@ The reverse path reduced optimizer throughput and increased E3 held-out loss fro
 Learned bidirectional agreement therefore supplied an easier auxiliary objective but did not select the arithmetic forward transition; the two learned paths could agree on latent behavior without improving final exactness.
 The counterintuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
 The next intuitive experiment should return to L8's faster forward-only model and correct the final-answer objective: mask base-4 semantic supervision to modulus-significant positions so padded high zeros cannot dominate, and emphasize the weakest official output digit with a smooth sequence-level maximum.
+
+## L10: Significance-balanced sequence supervision
+
+Date: 2026-08-02.
+
+Idea class: intuitive.
+
+Status: rejected before hosted submission.
+
+The hypothesis was that L8's twelve-position base-4 semantic loss was dominated by padded high zeros on the smaller Easy moduli, allowing a trivial zero-heavy state to overwhelm the output positions that determine exact accuracy, while mean token cross entropy permitted one weak decimal digit to invalidate an otherwise useful sequence.
+L10 restored L8's faster forward-only architecture and retained its parallel quotient, dilated carry-lookahead, coefficient invariants, annealed soft gates, optimizer, and hard evaluation decisions.
+The base-4 semantic loss was changed to average only positions at or below the modulus's highest nonzero radix digit, retaining every position that can represent a valid residue while removing structurally unused high padding.
+The official decimal-token objective was changed from a per-sequence mean to a normalized smooth maximum with temperature 0.25, increasing the gradient from the worst predicted answer digit without changing labels or examples.
+No architecture, optimizer, local budget, or dataset handling changed relative to the L8 control, and the 135,274 state elements remained competition-compliant and range-independent.
+
+The frozen candidate was screened with the same official datasets, splits, Apple M2 Pro device, 30-second Easy budgets, and 60-second Medium budgets as L8 and L9.
+
+| Dataset | Updates | Test | OOD | Mean exact accuracy | Max T | OOD N Max T |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| E1 | 286 | 6.67% | 10.00% | 8.33% | <1 | <1 |
+| E2 | 251 | 0.21% | 0.00% | 0.10% | <1 | <1 |
+| E3 | 614 | 1.25% | 2.37% | 1.81% | <1 | <1 |
+| E4 | 609 | 0.37% | 1.33% | 0.85% | <1 | <1 |
+| E5 | 279 | 0.92% | 0.17% | 0.54% | <1 | <1 |
+| M1 | 218 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| M2 | 218 | 0.49% | 0.66% | 0.57% | <1 | <1 |
+| M3 | 1,216 | 0.50% | 0.47% | 0.48% | <1 | <1 |
+| M4 | 411 | 0.19% | 0.18% | 0.18% | <1 | <1 |
+| M5 | 354 | 0.42% | 0.33% | 0.38% | <1 | <1 |
+
+The revised objective recovered the recurring E2, M2, and M3 marginal modes relative to L8, but E1, E3, E4, M4, and M5 were unchanged and E5 and M1 regressed.
+E3 and E4 again produced exactly the same example counts as L7 through L9, despite E3's combined training loss falling to 3.33 and every model receiving hundreds of updates.
+Padded high zeros and weak-digit averaging therefore affected which marginal decoder solution won on some families but did not cause the arithmetic-identifiability failure.
+The intuitive loss hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
+The next counterintuitive experiment should isolate the arithmetic learner from final-label shortcuts: train the quotient, carry, and residue transition only through its algebraic coefficient invariants, detach its recurrent state before the decimal decoder, and let official labels train only the readout from that state.
