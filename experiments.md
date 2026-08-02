@@ -218,3 +218,38 @@ The architecture also nested a significant-digit scan inside every requested squ
 The candidate therefore learned marginal output statistics rather than gate semantics, and its serial work reduced optimizer exposure precisely where deeper latent computation was needed.
 The intuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
 The next counterintuitive experiment should retain the bounded base-4 circuit but replace straight-through hard gates during training with a temperature-annealed soft relaxation, testing whether gradient mismatch rather than circuit expressivity prevented the algebraic invariants from identifying the discrete transition.
+
+## L7: Annealed soft radix gates
+
+Date: 2026-08-02.
+
+Idea class: counterintuitive.
+
+Status: rejected before hosted submission.
+
+The hypothesis was that L6's circuit was expressive enough but its straight-through estimator optimized soft expectations in the backward pass while composing hard argmax values in the forward pass, creating a gradient mismatch at every quotient, carry, and digit gate.
+L7 retained L6's architecture, base-4 state, algebraic invariant loss, immediate full-depth supervision, optimizer, and learning-rate schedule.
+During training only, every categorical gate composed its probability-weighted expected value; a wall-clock exponential schedule reduced the softmax temperature from 2.0 to 0.05 across the budget.
+Evaluation used the original hard argmax circuit, so any score gain required the relaxed training dynamics to identify discrete gate semantics rather than relying on fractional states at inference.
+The unchanged 21,061 persistent state elements remained range-independent and contained none of the prohibited memories, tables, branches, intermediate labels, or specialized operators.
+
+The frozen candidate was screened with the same official datasets, splits, Apple M2 Pro device, 30-second Easy budgets, and 60-second Medium budgets as L6.
+
+| Dataset | Updates | Test | OOD | Mean exact accuracy | Max T | OOD N Max T |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| E1 | 108 | 6.67% | 10.00% | 8.33% | <1 | <1 |
+| E2 | 86 | 0.21% | 0.00% | 0.10% | <1 | <1 |
+| E3 | 185 | 1.25% | 2.37% | 1.81% | <1 | <1 |
+| E4 | 264 | 0.37% | 1.33% | 0.85% | <1 | <1 |
+| E5 | 58 | 1.33% | 1.50% | 1.42% | <1 | <1 |
+| M1 | 46 | 0.00% | 0.07% | 0.03% | <1 | <1 |
+| M2 | 41 | 0.49% | 0.66% | 0.57% | <1 | <1 |
+| M3 | 253 | 0.50% | 0.47% | 0.48% | <1 | <1 |
+| M4 | 60 | 0.07% | 0.10% | 0.08% | <1 | <1 |
+| M5 | 53 | 0.02% | 0.03% | 0.03% | <1 | <1 |
+
+Relative to hard-gate L6, the annealed relaxation improved E1 from 0.00% to 8.33%, E4 from 0.39% to 0.85%, E5 from 0.21% to 1.42%, M1 from 0.00% to 0.03%, and M2 from 0.00% to 0.57%.
+E3 and M3 were unchanged at 1.81% and 0.48%, while E2 was unchanged within one example and M4 and M5 regressed.
+Thus the gradient mismatch was consequential for shallow fitting but was not the primary barrier to modular composition: no profile certified T=1, and the nested digit scan still limited deeper datasets to 41–60 optimizer updates.
+The counterintuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
+The next intuitive experiment should replace the inner serial Horner scan with a parallel carry-lookahead-style reducer built from shared dilated local blocks, preserving bounded radix interactions while reducing physical depth per square from linear to logarithmic in the digit count.

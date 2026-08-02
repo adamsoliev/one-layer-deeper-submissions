@@ -52,12 +52,20 @@ class Config:
         self.max_seq_len = max_seq_len
 
 
-def straight_through_choice(logits: Tensor, choices: Tensor) -> tuple[Tensor, Tensor]:
-    """Choose a discrete value while differentiating through its expectation."""
-    probabilities = F.softmax(logits.float(), dim=-1).to(logits.dtype)
+def relaxed_choice(
+    logits: Tensor,
+    choices: Tensor,
+    temperature: float,
+    *,
+    hard: bool,
+) -> tuple[Tensor, Tensor]:
+    """Train an annealed expectation and evaluate its discrete argmax."""
+    probabilities = F.softmax(
+        logits.float() / max(temperature, 0.05),
+        dim=-1,
+    ).to(logits.dtype)
     soft_value = torch.einsum("...k,k->...", probabilities, choices)
-    hard_value = choices[probabilities.argmax(dim=-1)]
-    value = hard_value + soft_value - soft_value.detach()
+    value = choices[probabilities.argmax(dim=-1)] if hard else soft_value
     entropy = -(probabilities * probabilities.clamp_min(1e-8).log()).sum(dim=-1)
     return value, entropy
 
@@ -108,6 +116,8 @@ class LearnedRadixSquare(nn.Module):
         multiplicand: Tensor,
         modulus_digits: Tensor,
         microsteps: int = STATE_DIGITS,
+        temperature: float = 1.0,
+        hard: bool = True,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         accumulator = torch.zeros_like(multiplicand)
         final_digit_logits = multiplicand.new_zeros(
@@ -181,9 +191,11 @@ class LearnedRadixSquare(nn.Module):
                 dim=-1,
             ).to(multiplicand.dtype)
             quotient_logits = self.quotient_network(quotient_features)
-            quotient, quotient_entropy = straight_through_choice(
+            quotient, quotient_entropy = relaxed_choice(
                 quotient_logits,
                 self.quotient_choices.to(quotient_logits.dtype),
+                temperature,
+                hard=hard,
             )
 
             raw_digits = candidate_digits - quotient[:, None] * active_modulus
@@ -197,14 +209,18 @@ class LearnedRadixSquare(nn.Module):
             )
             carry_state, _ = self.carry_scan(raw_features)
             carry_logits = self.carry_head(carry_state)
-            carries, carry_entropy = straight_through_choice(
+            carries, carry_entropy = relaxed_choice(
                 carry_logits,
                 self.carry_choices.to(carry_logits.dtype),
+                temperature,
+                hard=hard,
             )
             digit_logits = self.digit_head(carry_state)
-            next_digits, digit_entropy = straight_through_choice(
+            next_digits, digit_entropy = relaxed_choice(
                 digit_logits,
                 self.digit_choices.to(digit_logits.dtype),
+                temperature,
+                hard=hard,
             )
             incoming_carries = F.pad(carries[:, :-1], (1, 0))
             normalized_coefficients = raw_digits + incoming_carries - RADIX * carries
@@ -309,6 +325,7 @@ class RadixGateModel(nn.Module):
             nn.Linear(WIDTH, NUM_DECIMAL_DIGITS),
         )
         self.special_logits = nn.Parameter(torch.empty(DIGIT_OFFSET))
+        self.gate_temperature = 2.0
         self.register_buffer(
             "radix_powers",
             RADIX ** torch.arange(STATE_DIGITS, dtype=torch.long),
@@ -381,6 +398,8 @@ class RadixGateModel(nn.Module):
                 state[active_indices],
                 modulus_digits[active_indices],
                 microsteps,
+                self.gate_temperature,
+                not self.training,
             )
             state = state.index_copy(0, active_indices, proposal)
             state_logits = state_logits.index_copy(
@@ -571,8 +590,10 @@ class WallClockSchedule:
         self,
         optimizer: torch.optim.Optimizer,
         training_time_seconds: float,
+        model: RadixGateModel,
     ) -> None:
         self.optimizer = optimizer
+        self.model = model
         self.base_lrs = [group["lr"] for group in optimizer.param_groups]
         self.training_time_seconds = max(float(training_time_seconds), 1e-3)
         self.started_at = time.monotonic()
@@ -587,6 +608,7 @@ class WallClockSchedule:
             (time.monotonic() - self.started_at) / self.training_time_seconds,
             1.0,
         )
+        self.model.gate_temperature = 2.0 * (0.05 / 2.0) ** progress
         if progress < WARMUP_FRACTION:
             multiplier = (
                 MIN_LEARNING_RATE_RATIO
@@ -627,7 +649,9 @@ def build_optimizer(
         betas=(0.9, 0.98),
         eps=1e-8,
     )
-    scheduler = WallClockSchedule(optimizer, spec.training_time_seconds)
+    if not isinstance(model, RadixGateModel):
+        raise TypeError("unexpected model type")
+    scheduler = WallClockSchedule(optimizer, spec.training_time_seconds, model)
     return OptimizerBundle(optimizer, scheduler)
 
 
