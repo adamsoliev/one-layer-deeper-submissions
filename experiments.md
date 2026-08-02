@@ -579,3 +579,40 @@ An identifiable final state target is therefore insufficient when its gradient m
 The tied circuit neither fit its directly supervised endpoint reliably nor converted that signal into a reusable one-step arithmetic rule.
 The intuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
 The next counterintuitive experiment should preserve L16's forward computation and losses but detach the hard recurrent state between requested squares, truncating backpropagation through time so each tied call learns from its own algebraic constraint and the last call learns the endpoint directly instead of letting long straight-through credit corrupt earlier local transitions.
+
+## L17: Locally trained detached recurrence
+
+Date: 2026-08-02.
+
+Idea class: counterintuitive.
+
+Status: rejected before hosted submission.
+
+The hypothesis was that L16's endpoint gradient became destructive while traversing multiple hard straight-through radix states, whereas the tied transition could learn a reusable local rule from the direct algebraic constraint attached to every call and endpoint supervision attached to the final call.
+L17 retained L16's physical forward computation, discrete quotient/carry/residue decisions, worst-coefficient objective, final radix supervision, detached Fourier decoder, optimizer, schedule, and 135,274 persistent state elements.
+During training only, it detached each proposed hard radix state before feeding that state into the next requested square.
+Every transition call still contributed its own differentiable invariant and shared the same parameters, and the final call's logits still received the official endpoint loss; only backpropagation through earlier state values was truncated.
+Evaluation was bit-for-bit the same architecture as L16, and the change introduced no state, labels, tables, branches, or specialized computation.
+
+The frozen candidate was screened with the same official datasets, splits, Apple M2 Pro device, 30-second Easy budgets, and 60-second Medium budgets as L16.
+
+| Dataset | Updates | Test | OOD | Mean exact accuracy | Max T | OOD N Max T |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| E1 | 246 | 5.33% | 9.00% | 7.17% | <1 | <1 |
+| E2 | 224 | 1.04% | 1.33% | 1.19% | <1 | <1 |
+| E3 | 613 | 0.50% | 0.88% | 0.69% | <1 | <1 |
+| E4 | 612 | 0.25% | 1.00% | 0.62% | <1 | <1 |
+| E5 | 245 | 1.42% | 1.50% | 1.46% | <1 | <1 |
+| M1 | 211 | 0.00% | 0.07% | 0.03% | <1 | <1 |
+| M2 | 203 | 0.42% | 0.62% | 0.52% | <1 | <1 |
+| M3 | 1,205 | 0.21% | 0.23% | 0.22% | <1 | <1 |
+| M4 | 411 | 0.17% | 0.13% | 0.15% | <1 | <1 |
+| M5 | 332 | 0.34% | 0.37% | 0.36% | <1 | <1 |
+
+Truncated credit raised fixed-modulus E2 from 0.75% to 1.19% and changed E5 by one test example, but it sharply reduced sampled-modulus performance: E3 fell from 29 to 11 held-out correct examples, E4 declined, and M3, M4, and M5 all regressed.
+Every familiar- and unseen-modulus profile again failed at T=1.
+Throughput remained comparable to L16, including 613 E3 and 1,205 M3 updates, and total final losses of 3.53--3.90 still exceeded decimal-only evaluation losses by roughly 1.2--1.6.
+The direct local losses therefore did not become easier to solve when recurrent credit was removed.
+Full cross-step gradients were carrying useful sampled-family information even though they were insufficient for arithmetic; detaching them instead favored small fixed-family biases and degraded the reusable transition.
+The counterintuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
+The next intuitive experiment should restore full backpropagation through time but use the annealed categorical expectations and continuous carries as the physical training trajectory, allowing smooth endpoint credit through every square before converging toward the hard evaluation circuit.

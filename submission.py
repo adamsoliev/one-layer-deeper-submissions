@@ -1,4 +1,4 @@
-"""Endpoint-supervised discrete recurrence for modular squaring."""
+"""Locally trained discrete recurrence for modular squaring."""
 
 from __future__ import annotations
 
@@ -413,7 +413,8 @@ class ParallelCarryModel(nn.Module):
                 self.gate_temperature,
                 not self.training,
             )
-            state = state.index_copy(0, active_indices, proposal)
+            recurrent_proposal = proposal.detach() if self.training else proposal
+            state = state.index_copy(0, active_indices, recurrent_proposal)
             state_logits = state_logits.index_copy(
                 0,
                 active_indices,
