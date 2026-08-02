@@ -140,3 +140,42 @@ The directional recurrence matched L3 on E1, E2, M1, M4, and M5 within sampling 
 Every depth profile again failed to certify even T=1, so exposing traversal order increased update throughput without teaching a correct modular-square transition.
 The intuitive hypothesis is rejected, no hosted E3 or E4 quota was consumed, and neither the hosted-only DuckDB records nor the README Architecture results table was changed.
 The next counterintuitive experiment should test a redundant signed-digit latent state, whose local carry-free product representation may be easier to compose than canonical decimal digits, while retaining final-answer-only supervision and a range-independent tied transition.
+
+## L5: Redundant-digit invariant recurrence
+
+Date: 2026-08-02.
+
+Idea class: counterintuitive.
+
+Status: rejected before hosted submission.
+
+The hypothesis was that canonical decimal states made modular reduction unnecessarily difficult because subtraction requires coordinated borrows, whereas redundant signed coefficients permit value-preserving subtraction before a learned carry pass restores canonical digits.
+Each tied square used eight high-to-low decimal Horner steps, reducing the learned quotient at every step from an unbounded whole-square value to one of the nineteen values from 0 through 18.
+The candidate subtracted the selected multiple of the modulus in a redundant signed-digit workspace, used a shared low-to-high GRU to choose carries and canonical output digits, and composed the same square transition once per requested `T` step.
+Straight-through categorical decisions preserved a gradient through quotient, carry, and digit expectations.
+The custom loss combined final sequence and fixed-width decimal supervision with label-free invariants requiring each reduced value to lie in `[0,N)`, each normalized coefficient to lie in `[0,9]`, the final carry to vanish, and the selected canonical digits to preserve the reduced value.
+These constraints were algebraic properties rather than solver-derived intermediate labels.
+A wall-clock curriculum first exposed one Horner step, progressively exposed all eight, and enabled the complete requested squaring depth and final-answer loss after 60% of the budget; this prevented random early carries from recursively producing non-finite coefficients.
+The recurrent state itself was chosen from learned decimal digit logits, so failed internal guesses remained bounded without clamping or excluding any input example.
+The 23,389 persistent state elements contained no whole-value or prompt-key memories, residue or factor tables, enumerated ranges, dataset branches, T-specific operators, or parameters that scaled with the largest representable integer.
+
+The frozen candidate was screened with the same official datasets, splits, Apple M2 Pro device, 30-second Easy budgets, and 60-second Medium budgets as the preceding experiments.
+
+| Dataset | Updates | Test | OOD | Mean exact accuracy | Max T | OOD N Max T |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| E1 | 550 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| E2 | 524 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| E3 | 613 | 0.00% | 0.50% | 0.25% | <1 | <1 |
+| E4 | 602 | 0.12% | 0.08% | 0.10% | <1 | <1 |
+| E5 | 527 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| M1 | 1,045 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| M2 | failed at update 1,001 | — | — | — | — | — |
+| M3 | 1,292 | 0.08% | 0.07% | 0.07% | <1 | <1 |
+| M4 | 1,070 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| M5 | 1,102 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+
+The curriculum made the implementation numerically usable on nine datasets, and several invariant losses fell by orders of magnitude, but exact accuracy became worse than the simpler L1 through L4 models.
+Low invariant loss therefore did not identify the correct discrete quotient, carry, and digit decisions: the model found soft constraint-satisfying behavior whose argmax computation was not an arithmetic transducer.
+The longer Medium budgets did not rescue the representation, and M2 ended with a non-finite training loss at update 1,001, so L5 also failed the mandatory full-coverage gate.
+The counterintuitive hypothesis is rejected, no hosted quota was consumed, and the hosted-only DuckDB and README Architecture results remain unchanged.
+The next intuitive experiment should use a fully bounded binary state with one tied local gate network for multiplication, comparison, and conditional subtraction, avoiding both unbounded quotient classification and indirectly learned decimal canonicalization while keeping every bit decision learned end to end.
