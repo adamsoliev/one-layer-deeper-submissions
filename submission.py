@@ -1,4 +1,4 @@
-"""Detached-phase coarse-radix recurrence for modular squaring."""
+"""Tied-refinement coarse-radix recurrence for modular squaring."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ STATE_DIGITS = 6
 EXTENDED_DIGITS = STATE_DIGITS + 1
 OUTPUT_DIGITS = 8
 WIDTH = 96
+QUOTIENT_REFINEMENT_STEPS = 4
 FOURIER_HARMONICS = 8
 MAX_TRAIN_TIME_STEPS = 16
 MAX_EVAL_TIME_STEPS = 64
@@ -59,12 +60,11 @@ class CoarseRadixSquare(nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.quotient_trunk = nn.Sequential(
+        self.quotient_encoder = nn.Sequential(
             nn.Linear(9, WIDTH),
             nn.SiLU(),
-            nn.Linear(WIDTH, WIDTH),
-            nn.SiLU(),
         )
+        self.quotient_refiner = nn.GRUCell(WIDTH, WIDTH)
         self.quotient_head = nn.Linear(WIDTH, 1)
         self.register_buffer(
             "state_powers_float",
@@ -140,7 +140,6 @@ class CoarseRadixSquare(nn.Module):
             )
             denominator = active_modulus_value.clamp_min(1.0)
             candidate_ratio = candidate_value / denominator
-            phase_ratio = candidate_ratio.detach()
             rank_feature = torch.full_like(
                 candidate_ratio,
                 rank / max(STATE_DIGITS - 1, 1),
@@ -154,12 +153,18 @@ class CoarseRadixSquare(nn.Module):
                     multiplier_digit.float() / (RADIX - 1),
                     torch.log1p(denominator) / math.log(16_777_217.0),
                     rank_feature,
-                    torch.sin(2.0 * math.pi * phase_ratio),
-                    torch.cos(2.0 * math.pi * phase_ratio),
+                    torch.sin(math.pi * candidate_ratio / RADIX),
+                    torch.cos(math.pi * candidate_ratio / RADIX),
                 ),
                 dim=-1,
             ).to(multiplicand.dtype)
-            quotient_hidden = self.quotient_trunk(quotient_features)
+            quotient_encoding = self.quotient_encoder(quotient_features)
+            quotient_hidden = quotient_encoding
+            for _ in range(QUOTIENT_REFINEMENT_STEPS):
+                quotient_hidden = self.quotient_refiner(
+                    quotient_encoding,
+                    quotient_hidden,
+                )
             soft_quotient = QUOTIENT_MAX * torch.sigmoid(
                 self.quotient_head(quotient_hidden).squeeze(-1),
             )
@@ -253,7 +258,7 @@ class CoarseRadixModel(nn.Module):
 
     @staticmethod
     def _initialize(module: nn.Module) -> None:
-        if isinstance(module, nn.Linear):
+        if isinstance(module, (nn.Linear, nn.GRUCell)):
             for name, parameter in module.named_parameters(recurse=False):
                 if "weight" in name:
                     nn.init.normal_(parameter, mean=0.0, std=0.02)

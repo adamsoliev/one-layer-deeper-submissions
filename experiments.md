@@ -1071,3 +1071,44 @@ Final E3 loss was identical to L28 at 64.18, E4 changed only from 56.71 to 56.51
 Unit-period phase values therefore add no useful quotient-selection capacity under this local objective, even after their destructive recurrent gradient is removed.
 The counterintuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
 The next intuitive experiment should return to L26's stable low-frequency inputs and replace the shallow quotient MLP with a fixed-depth weight-tied GRU refinement, spending additional latent serial computation on each local quotient decision without adding range-dependent state or intermediate supervision.
+
+## L30: Tied latent quotient refinement
+
+Date: 2026-08-02.
+
+Idea class: intuitive.
+
+Status: rejected before hosted submission because two required suites failed.
+
+The hypothesis was that L26's shallow feed-forward quotient head lacked sufficient reusable serial depth to form the discontinuous local divider, even though its interval and lattice objective supplied the necessary information.
+L30 returned exactly to L26's stable low-frequency quotient features, bounded continuous training quotient, endpoint-free interval and lattice losses, exact positional normalization, six tied Horner steps, detached Fourier decoder, optimizer, schedule, and rounded evaluation recurrence.
+It replaced the 9-to-96-to-96 quotient MLP with a 9-to-96 encoder followed by four applications of one shared 96-wide GRUCell before the quotient head.
+The ephemeral hidden state was initialized from the encoded local features and reset at every Horner position, adding fixed latent decision depth without persistent example memory.
+The architecture used 68,897 persistent state elements, and a direct backward check verified finite gradients on every shared refiner parameter.
+It added no labels, table, enumeration, branch, solver operation, range-dependent parameter, or specialized T computation.
+
+The frozen candidate was screened with the same official datasets, splits, Apple M2 Pro device, 30-second Easy budgets, and 60-second Medium budgets as L26.
+
+| Dataset | Updates | Test | OOD | Mean exact accuracy | Max T | OOD N Max T |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| E1 | 317 | 6.67% | 10.00% | 8.33% | <1 | <1 |
+| E2 | 272 | 0.21% | 0.00% | 0.10% | <1 | <1 |
+| E3 | 597 | 1.25% | 2.37% | 1.81% | <1 | <1 |
+| E4 | 589 | 0.37% | 1.33% | 0.85% | <1 | <1 |
+| E5 | 321 | 1.33% | 1.50% | 1.42% | <1 | <1 |
+| M1 | 2 | failed: non-finite loss | failed | failed | failed | failed |
+| M2 | 19 | failed: non-finite loss | failed | failed | failed | failed |
+| M3 | 858 | 0.50% | 0.47% | 0.48% | <1 | <1 |
+| M4 | 204 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| M5 | 216 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+
+Additional tied quotient depth did not alter E3, E4, E5, or M3 hard split counts, and every successful familiar- and unseen-modulus profile failed at T=1.
+E1 returned to its recurring marginal baseline, but E2 collapsed and M4 and M5 fell to zero.
+M1 became non-finite at update 2 and M2 at update 19, sacrificing L26's complete coverage despite bounded outputs and low-frequency inputs.
+The four refinement calls also reduced fixed-budget throughput: E3 fell from 804 to 597 updates, E4 from 791 to 589, and M3 from 1,105 to 858.
+That compute cost did not buy an easier objective.
+Final loss worsened from 64.01 to 64.37 on E3, from 55.81 to 56.69 on E4, and from 47.58 to 47.71 on M3.
+The shallow quotient head's representational capacity was therefore not the operative bottleneck.
+Full backpropagation through tied latent refinement compounds unstable recurrent credit while producing the same hard decision plateau.
+The intuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
+The next counterintuitive experiment should retain the four-step tied quotient refiner but detach its hidden state after the first three training iterations, so shared parameters learn through the final local update without backpropagating through the entire refinement chain; evaluation should remain the same four-step recurrence.
