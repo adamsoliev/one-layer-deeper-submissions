@@ -1112,3 +1112,42 @@ The shallow quotient head's representational capacity was therefore not the oper
 Full backpropagation through tied latent refinement compounds unstable recurrent credit while producing the same hard decision plateau.
 The intuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
 The next counterintuitive experiment should retain the four-step tied quotient refiner but detach its hidden state after the first three training iterations, so shared parameters learn through the final local update without backpropagating through the entire refinement chain; evaluation should remain the same four-step recurrence.
+
+## L31: Truncated quotient-refinement credit
+
+Date: 2026-08-02.
+
+Idea class: counterintuitive.
+
+Status: rejected before hosted submission.
+
+The hypothesis was that L30's four-step quotient refiner supplied useful forward computation but became unstable because full backpropagation forced the shared GRU to carry credit through all four latent updates.
+L31 retained L30's architecture, inputs, 68,897 persistent state elements, objectives, optimizer, schedule, and four-step evaluation recurrence.
+During training only, it detached the hidden state after each of the first three refinements, so the shared refiner learned through the fourth update without receiving gradients through the preceding hidden-state chain.
+A direct check verified bit-exact relaxed forward values between training and evaluation modes, absent gradients on the first three refinement states, and finite nonzero gradients on the final state and every shared refiner parameter.
+The change added no state, label, table, enumeration, branch, solver operation, range-dependent parameter, or specialized T computation.
+
+The frozen candidate was screened with the same official datasets, splits, Apple M2 Pro device, 30-second Easy budgets, and 60-second Medium budgets as L30.
+
+| Dataset | Updates | Test | OOD | Mean exact accuracy | Max T | OOD N Max T |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| E1 | 311 | 4.00% | 9.00% | 6.50% | <1 | <1 |
+| E2 | 266 | 1.25% | 0.33% | 0.79% | <1 | <1 |
+| E3 | 563 | 1.25% | 2.37% | 1.81% | <1 | <1 |
+| E4 | 523 | 0.37% | 1.33% | 0.85% | <1 | <1 |
+| E5 | 308 | 1.33% | 1.50% | 1.42% | <1 | <1 |
+| M1 | 163 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| M2 | 162 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| M3 | 933 | 0.50% | 0.47% | 0.48% | <1 | <1 |
+| M4 | 212 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| M5 | 228 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+
+Truncated credit restored complete numerical coverage: M1 and M2 finished 163 and 162 updates with finite final losses of 47.51 and 35.94 instead of failing at L30 updates 2 and 19.
+That confirms that L30's long hidden-state credit path, rather than its four-step forward values, caused the two Medium failures.
+The stable recurrence did not improve arithmetic.
+E3, E4, E5, and M3 reproduced L30's exact hard split counts, while M1, M2, M4, and M5 scored zero and every familiar- and unseen-modulus profile failed at T=1.
+E1 and E2 moved back toward the preceding stable baselines rather than showing a consistent gain.
+Final loss improved only from 64.37 to 63.83 on E3 and from 56.69 to 56.51 on E4, while worsening from 47.71 to 48.06 on M3; none of those movements changed one hard prediction.
+The counterintuitive stability hypothesis is supported, but its implied accuracy hypothesis is rejected: additional tied latent quotient computation remains useless when earlier refinements receive neither stable end-to-end credit nor their own identifying signal.
+No hosted quota was consumed, and the hosted README and DuckDB results remain unchanged.
+The next intuitive experiment should return to L26's faster shallow quotient head and replace its exponentially saturating sigmoid quotient link with a smooth algebraically bounded link, testing whether polynomial-tail gradients can reduce the persistently large interval loss without sacrificing the valid quotient range or complete suite coverage.

@@ -1,4 +1,4 @@
-"""Tied-refinement coarse-radix recurrence for modular squaring."""
+"""Truncated-credit coarse-radix recurrence for modular squaring."""
 
 from __future__ import annotations
 
@@ -160,11 +160,13 @@ class CoarseRadixSquare(nn.Module):
             ).to(multiplicand.dtype)
             quotient_encoding = self.quotient_encoder(quotient_features)
             quotient_hidden = quotient_encoding
-            for _ in range(QUOTIENT_REFINEMENT_STEPS):
+            for refinement_step in range(QUOTIENT_REFINEMENT_STEPS):
                 quotient_hidden = self.quotient_refiner(
                     quotient_encoding,
                     quotient_hidden,
                 )
+                if self.training and refinement_step + 1 < QUOTIENT_REFINEMENT_STEPS:
+                    quotient_hidden = quotient_hidden.detach()
             soft_quotient = QUOTIENT_MAX * torch.sigmoid(
                 self.quotient_head(quotient_hidden).squeeze(-1),
             )
