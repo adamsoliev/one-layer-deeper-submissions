@@ -1,4 +1,4 @@
-"""Algebraic-link coarse-radix recurrence for modular squaring."""
+"""Locally trained coarse-radix recurrence for modular squaring."""
 
 from __future__ import annotations
 
@@ -159,16 +159,8 @@ class CoarseRadixSquare(nn.Module):
                 dim=-1,
             ).to(multiplicand.dtype)
             quotient_hidden = self.quotient_trunk(quotient_features)
-            quotient_logit = self.quotient_head(quotient_hidden).squeeze(-1)
-            scaled_quotient_logit = 0.5 * quotient_logit
-            soft_quotient = (
-                0.5
-                * QUOTIENT_MAX
-                * (
-                    1.0
-                    + scaled_quotient_logit
-                    * torch.rsqrt(1.0 + scaled_quotient_logit.square())
-                )
+            soft_quotient = QUOTIENT_MAX * torch.sigmoid(
+                self.quotient_head(quotient_hidden).squeeze(-1),
             )
             quotient = relaxed_or_rounded(soft_quotient, hard=hard)
 
@@ -305,6 +297,8 @@ class CoarseRadixModel(nn.Module):
                 not self.training,
             )
             state = state.index_copy(0, active_indices, proposal)
+            if self.training:
+                state = state.detach()
             invariant_losses.append(invariant_loss)
             entropies.append(entropy)
 

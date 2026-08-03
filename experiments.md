@@ -1189,3 +1189,42 @@ The continuous objective did not improve consistently: final loss moved from 64.
 Polynomial-tail gradients therefore remained available as designed but neither reduced loss broadly nor changed material hard decisions, rejecting sigmoid tail saturation as the operative bottleneck.
 No hosted quota was consumed, and the hosted README and DuckDB results remain unchanged.
 The next counterintuitive experiment should return to L26's sigmoid link and detach the recurrent residue state after every training-time squaring transition while preserving identical forward values and full evaluation recurrence, testing whether local invariant credit is obscured by backpropagation through off-manifold states across requested T steps.
+
+## L33: Locally trained outer recurrence
+
+Date: 2026-08-03.
+
+Idea class: counterintuitive.
+
+Status: rejected before hosted submission.
+
+The hypothesis was that later invariant losses sent noisy credit backward through earlier off-manifold residue states, obscuring the local quotient signal over repeated squaring steps.
+L33 returned exactly to L26's 22,337-element sigmoid quotient architecture, inputs, endpoint-free interval and lattice losses, exact positional normalization, six tied Horner steps, detached Fourier decoder, optimizer, schedule, and full evaluation recurrence.
+During training only, it detached the complete residue state after each square, so every tied transition retained its local invariant gradient but no later square backpropagated through an earlier state.
+A direct two-step check verified bit-exact forward states and local losses, removed gradient on the first transition's output state, and retained finite nonzero gradients on every shared quotient parameter from the second transition's local loss.
+The change added no state, label, table, enumeration, branch, solver operation, range-dependent parameter, or specialized T computation.
+
+The frozen candidate was screened with the same official datasets, splits, Apple M2 Pro device, 30-second Easy budgets, and 60-second Medium budgets as L26.
+
+| Dataset | Updates | Test | OOD | Mean exact accuracy | Max T | OOD N Max T |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| E1 | 372 | 6.67% | 10.00% | 8.33% | <1 | <1 |
+| E2 | 322 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| E3 | 613 | 1.25% | 2.37% | 1.81% | <1 | <1 |
+| E4 | 609 | 0.37% | 1.33% | 0.85% | <1 | <1 |
+| E5 | 377 | 1.33% | 1.50% | 1.42% | <1 | <1 |
+| M1 | 221 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| M2 | 217 | 0.49% | 0.66% | 0.57% | <1 | <1 |
+| M3 | 1,042 | 0.50% | 0.47% | 0.48% | <1 | <1 |
+| M4 | 294 | 0.19% | 0.18% | 0.18% | <1 | <1 |
+| M5 | 337 | 0.42% | 0.33% | 0.38% | <1 | <1 |
+
+Outer-state detachment retained complete numerical coverage and reduced the local objective on several longer-horizon Medium regimes.
+Relative to L26, final loss fell from 36.09 to 34.91 on M2, from 24.22 to 21.20 on M4, and from 45.64 to 43.05 on M5.
+Those three datasets moved to split-consistent nonzero scores, but their exact counts merely reproduced recurring marginal modes already observed under L10, L12, and L14, and every familiar- and unseen-modulus profile still failed at T=1.
+M3 reproduced L26 exactly and M1 remained zero.
+The intervention did not help short-horizon arithmetic: E3, E4, and E5 retained identical hard split counts, E2 collapsed to zero, and final loss worsened from 64.01 to 65.50 on E3 and from 55.81 to 56.86 on E4.
+Cross-T credit therefore harms optimization in some longer recurrences, but removing it only changes which marginal readout mode wins and does not teach an exact local quotient rule.
+The counterintuitive hypothesis is partially supported as a training-dynamics diagnosis and rejected as an accuracy intervention.
+No hosted quota was consumed, and the hosted README and DuckDB results remain unchanged.
+The next intuitive experiment should restore L26's end-to-end transition credit and replace its flat in-range hinge penalty with a symmetric smooth barrier around the valid residual interval, testing whether a nonzero feasibility gradient and greater rounding margin can train the shared quotient without intermediate labels or range-dependent state.
