@@ -1,4 +1,4 @@
-"""Factorized coarse-radix recurrence for repeated modular squaring."""
+"""Scalar-quotient coarse-radix recurrence for modular squaring."""
 
 from __future__ import annotations
 
@@ -42,7 +42,6 @@ X_TOKEN_ID = 3
 T_TOKEN_ID = 4
 DIGIT_OFFSET = 7
 NUM_DECIMAL_DIGITS = 10
-QUOTIENT_HIGH_RADIX = 2
 QUOTIENT_MAX = 2 * RADIX - 2
 MAX_RAW_COEFFICIENT = QUOTIENT_MAX * (RADIX - 1)
 
@@ -89,15 +88,10 @@ class CoarseRadixSquare(nn.Module):
             nn.Linear(WIDTH, WIDTH),
             nn.SiLU(),
         )
-        self.quotient_high_head = nn.Linear(WIDTH, QUOTIENT_HIGH_RADIX)
-        self.quotient_low_head = nn.Linear(WIDTH, RADIX)
+        self.quotient_head = nn.Linear(WIDTH, 1)
         self.carry_scan = nn.GRU(10, CARRY_WIDTH, batch_first=True)
         self.carry_head = nn.Linear(CARRY_WIDTH, 1)
         self.digit_head = nn.Linear(CARRY_WIDTH, RADIX)
-        self.register_buffer(
-            "high_choices",
-            torch.arange(QUOTIENT_HIGH_RADIX, dtype=torch.float32),
-        )
         self.register_buffer(
             "digit_choices",
             torch.arange(RADIX, dtype=torch.float32),
@@ -206,21 +200,10 @@ class CoarseRadixSquare(nn.Module):
                 dim=-1,
             ).to(multiplicand.dtype)
             quotient_hidden = self.quotient_trunk(quotient_features)
-            high_logits = self.quotient_high_head(quotient_hidden)
-            quotient_high, high_entropy = straight_through_choice(
-                high_logits,
-                self.high_choices.to(high_logits.dtype),
-                temperature,
-                hard=hard,
+            soft_quotient = QUOTIENT_MAX * torch.sigmoid(
+                self.quotient_head(quotient_hidden).squeeze(-1),
             )
-            low_logits = self.quotient_low_head(quotient_hidden)
-            quotient_low, low_entropy = straight_through_choice(
-                low_logits,
-                self.digit_choices.to(low_logits.dtype),
-                temperature,
-                hard=hard,
-            )
-            quotient = RADIX * quotient_high + quotient_low
+            quotient = straight_through_round(soft_quotient, hard=hard)
 
             raw_coefficients = (
                 candidate_coefficients - quotient[:, None] * extended_modulus
@@ -292,11 +275,7 @@ class CoarseRadixSquare(nn.Module):
                 + torch.log1p(above_modulus).square().mean()
                 + torch.log1p(representation_error).square().mean(),
             )
-            entropies.append(
-                high_entropy.float().mean()
-                + low_entropy.float().mean()
-                + digit_entropy.float().mean(),
-            )
+            entropies.append(digit_entropy.float().mean())
 
         return (
             accumulator,

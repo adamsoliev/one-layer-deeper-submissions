@@ -726,3 +726,38 @@ Even successful suites retained very large final total losses, from 6.88 on E3 t
 The corrected ordered computation therefore did not make the factorized hard quotient/carry decisions learnable under the fixed clock, and its six Horner calls per requested square reduced deeper-family updates to 77--112 before evaluation.
 The intuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
 The next counterintuitive experiment should retain the correct serial Horner structure but replace the binary-plus-hexadecimal quotient categories with one continuous scalar quotient field followed by straight-through integer rounding, testing whether a low-dimensional monotone regression can solve the local division step without the combinatorial categorical landscape.
+
+## L21: Scalar quotient serial reducer
+
+Date: 2026-08-02.
+
+Idea class: counterintuitive.
+
+Status: rejected before hosted submission.
+
+The hypothesis was that L20's ordered Horner recurrence was correct but its independently chosen binary and hexadecimal quotient components created a combinatorial hard-gate landscape, whereas each local quotient is fundamentally one monotone scalar between 0 and 30.
+L21 retained L20's base-16 state, six tied Horner microsteps, seven-coefficient overflow-safe representation, learned carry GRU, hard digit choices, worst constraints, final radix supervision, detached Fourier decoder, optimizer, and schedule.
+It replaced the two categorical quotient heads with one scalar MLP output mapped through `30 * sigmoid` and straight-through integer rounding.
+This bounded the quotient by the local Horner identity without enumerating values or adding value-sized parameters, reduced persistent state to 38,057 elements, and changed no data handling or evaluation computation beyond the quotient parameterization.
+
+The frozen candidate was screened with the same official datasets, splits, Apple M2 Pro device, 30-second Easy budgets, and 60-second Medium budgets as L20.
+
+| Dataset | Updates | Test | OOD | Mean exact accuracy | Max T | OOD N Max T |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| E1 | 178 | 6.67% | 10.00% | 8.33% | <1 | <1 |
+| E2 | 153 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| E3 | 563 | 1.25% | 2.13% | 1.69% | <1 | <1 |
+| E4 | 563 | 0.69% | 1.00% | 0.84% | <1 | <1 |
+| E5 | 186 | 1.33% | 1.50% | 1.42% | <1 | <1 |
+| M1 | 89 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| M2 | 93 | 0.49% | 0.66% | 0.57% | <1 | <1 |
+| M3 | 633 | 0.25% | 0.30% | 0.27% | <1 | <1 |
+| M4 | 124 | 0.19% | 0.18% | 0.18% | <1 | <1 |
+| M5 | 118 | 0.42% | 0.33% | 0.38% | <1 | <1 |
+
+The scalar field completed every suite without numerical failure and repaired L20's catastrophic E4, E5, and M4 regressions, but it did not improve arithmetic: E3 fell to 1.69%, E2 and M1 were zero, and every depth profile failed at T=1.
+Its algebraic objective also remained far from solved, with final total losses from 5.42 on M4 to 122.67 on E1 while decimal-only losses stayed near 2.3.
+The counterintuitive simplification therefore identifies quotient factorization as a source of instability but not the principal accuracy barrier.
+The serial circuit's learned seven-position carry and digit normalization still cannot satisfy exact local value preservation within the fixed update budget.
+The counterintuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
+The next intuitive experiment should keep the learned scalar quotient but replace the carry GRU and digit categories with an exact parameter-free radix-normalization recurrence equipped with straight-through surrogate gradients, reserving learned capacity for quotient selection while making representation conversion correct by construction.
