@@ -954,3 +954,43 @@ That improvement did not alter a single hard target prediction after 804 and 791
 Continuous local credit therefore creates another relaxation gap: it marginally improves the training trajectory but does not bring quotient estimates onto the integer decisions used by evaluation.
 The intuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
 The next counterintuitive experiment should retain the smooth endpoint-free trajectory but replace the mathematically valid on-manifold `[0, 30]` sigmoid quotient bound with an unbounded positive field, allowing the learned divider to repair off-manifold recurrent states whose required quotient exceeds 30 instead of saturating permanently after an early error.
+
+## L27: Unbounded recovery quotient field
+
+Date: 2026-08-02.
+
+Idea class: counterintuitive.
+
+Status: rejected before hosted submission because one required suite failed.
+
+The hypothesis was that L26's quotient bound of 0 through 30 was valid only while every earlier prediction maintained `0 <= accumulator < N`; after one error, later local interval constraints could require a quotient above 30 and become impossible to satisfy, permanently poisoning the recurrent trajectory.
+L27 retained L26's 22,337-element architecture, smooth endpoint-free trajectory, integer-lattice penalty, exact positional normalization, six tied Horner steps, detached Fourier decoder, optimizer, schedule, and rounded evaluation recurrence.
+It replaced `30 * sigmoid(logit)` with a positive unbounded scaled-softplus field.
+The scale preserved the same initial quotient of 15 at a zero logit, while allowing larger values for off-manifold recovery without adding parameters or a magnitude-dependent table.
+A direct check verified the matched initialization, quotient values above 30, and finite positive gradients.
+No labels, branches, enumeration, solver operation, or specialized T computation were added.
+
+The frozen candidate was screened with the same official datasets, splits, Apple M2 Pro device, 30-second Easy budgets, and 60-second Medium budgets as L26.
+
+| Dataset | Updates | Test | OOD | Mean exact accuracy | Max T | OOD N Max T |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| E1 | 376 | 6.67% | 10.00% | 8.33% | <1 | <1 |
+| E2 | 310 | 0.42% | 0.00% | 0.21% | <1 | <1 |
+| E3 | 796 | 1.25% | 2.37% | 1.81% | <1 | <1 |
+| E4 | 813 | 0.37% | 1.33% | 0.85% | <1 | <1 |
+| E5 | 446 | 0.50% | 0.33% | 0.42% | <1 | <1 |
+| M1 | 2 | failed: non-finite loss | failed | failed | failed | failed |
+| M2 | 224 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| M3 | 1,248 | 0.50% | 0.47% | 0.48% | <1 | <1 |
+| M4 | 303 | 0.00% | 0.02% | 0.01% | <1 | <1 |
+| M5 | 337 | 0.09% | 0.07% | 0.08% | <1 | <1 |
+
+The unbounded field reintroduced a more severe numerical failure than endpoint supervision: M1 became non-finite at update 2, whereas bounded endpoint-free L25 and L26 completed every suite.
+E3 and E4 again reproduced the exact L26 split counts and every successful depth profile failed at T=1.
+E1 returned to its recurring marginal baseline, but E2 regressed and E5 collapsed from 24 total correct examples to eight; changes on M4 and M5 remained chance-scale.
+The extra support did alter relaxed optimization without helping hard computation.
+Final total loss worsened from 64.01 to 66.45 on E3, improved from 55.81 to 54.79 on E4, and improved from 47.58 to 37.77 on M3, yet all three retained identical hard split counts.
+Off-manifold quotient saturation was therefore not the primary obstacle.
+Removing it gives the optimizer uncontrolled quotient and recurrent-state magnitudes, widens the relaxed-state/readout mismatch, and sacrifices the stability established by bounded endpoint-free training.
+The counterintuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
+The next intuitive experiment should return to L26's stable bounded quotient but replace its low-frequency ratio features with unit-period Fourier phase features, exposing the repeated integer boundaries required by floor-like quotient selection while leaving magnitude prediction learned and range-independent.
