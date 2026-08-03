@@ -876,3 +876,41 @@ Normalizing a globally invalid six-digit state by a much smaller modulus still l
 The resulting gradient neither trained exact quotient choices nor eliminated recurrent numerical instability.
 The intuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
 The next counterintuitive experiment should remove final-answer supervision from the transition entirely and train the shared quotient rule only through its uniquely identifying local interval constraints, testing whether endpoint gradients are actively corrupting a serial self-supervised reducer while the detached decimal decoder continues to learn output formatting.
+
+## L25: Endpoint-free local quotient learning
+
+Date: 2026-08-02.
+
+Idea class: counterintuitive.
+
+Status: rejected before hosted submission.
+
+The hypothesis was that L22 through L24 became numerically unstable because global final-answer gradients traversed many hard quotient, carry, and positional decisions, actively corrupting a shared local divider that was already uniquely identified by `0 <= candidate - qN < N` at every Horner step.
+L25 retained L24's 22,337-element model, exact base-16 normalization, scalar quotient MLP and hard straight-through decisions, six tied Horner steps, local interval loss, detached Fourier decoder, optimizer, schedule, and deployed evaluation recurrence.
+It removed all final-answer supervision and auxiliary endpoint state from the transition.
+Official labels continued to train the detached decimal decoder, while quotient parameters received gradients only from the label-free local interval constraints.
+The change added no state, label, table, branch, enumeration, solver operation, or specialized T computation.
+
+The frozen candidate was screened with the same official datasets, splits, Apple M2 Pro device, 30-second Easy budgets, and 60-second Medium budgets as L24.
+
+| Dataset | Updates | Test | OOD | Mean exact accuracy | Max T | OOD N Max T |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| E1 | 351 | 6.67% | 10.00% | 8.33% | <1 | <1 |
+| E2 | 293 | 0.42% | 0.67% | 0.54% | <1 | <1 |
+| E3 | 773 | 1.25% | 2.37% | 1.81% | <1 | <1 |
+| E4 | 777 | 0.37% | 1.33% | 0.85% | <1 | <1 |
+| E5 | 347 | 1.33% | 1.50% | 1.42% | <1 | <1 |
+| M1 | 215 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| M2 | 225 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| M3 | 1,280 | 0.50% | 0.47% | 0.48% | <1 | <1 |
+| M4 | 312 | 0.01% | 0.01% | 0.01% | <1 | <1 |
+| M5 | 301 | 0.07% | 0.20% | 0.13% | <1 | <1 |
+
+Removing endpoint gradients restored complete numerical coverage: M1 trained for 215 updates and evaluated normally instead of becoming non-finite at updates 4--12 under L22--L24.
+It also returned E1 and E3 to their recurring 8.33% and 1.81% marginal baselines, but E4, E5, M2, M3, and M4 reproduced chance-scale prior counts, E2 regressed, and M1 remained exactly zero.
+M5 gained one net example relative to L24, which is not meaningful at its sample size.
+Every familiar- and unseen-modulus profile failed at T=1.
+The local objective remained far from solved despite stable additional optimization: total final losses were 22.24--68.44 while detached decimal evaluation losses stayed near 2.3, and M3's exact predictions were unchanged after 1,280 updates versus L24's 950.
+Global endpoint gradients were therefore the source of the exact-normalizer's numerical instability, but removing them exposed a second independent failure: hard recurrent interval loss is a poor optimization surrogate for learning the shared quotient rule.
+The counterintuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
+The next intuitive experiment should train a continuous quotient and continuous normalized residue trajectory, add an unlabeled integer-lattice penalty to make quotient estimates converge toward discrete values, and retain the exact rounded recurrence for evaluation, testing whether a smooth local path can solve interval feasibility without reopening global endpoint instability.

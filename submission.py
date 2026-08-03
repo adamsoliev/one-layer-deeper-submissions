@@ -1,4 +1,4 @@
-"""Residue-regressed coarse-radix recurrence for modular squaring."""
+"""Locally constrained coarse-radix recurrence for modular squaring."""
 
 from __future__ import annotations
 
@@ -31,7 +31,6 @@ MAX_TRAINING_STEPS = 1_000_000
 BASE_LEARNING_RATE = 3e-3
 MIN_LEARNING_RATE_RATIO = 0.05
 WARMUP_FRACTION = 0.05
-ENDPOINT_WEIGHT = 0.75
 INVARIANT_WEIGHT = 0.5
 ENTROPY_WEIGHT = 0.002
 WEAK_DIGIT_TEMPERATURE = 0.25
@@ -263,7 +262,7 @@ class CoarseRadixModel(nn.Module):
         self,
         input_ids: Tensor,
         attention_mask: Tensor | None = None,
-    ) -> tuple[Tensor, tuple[Tensor, Tensor, Tensor, Tensor]]:
+    ) -> tuple[Tensor, tuple[Tensor, Tensor]]:
         if attention_mask is None:
             attention_mask = input_ids != PAD_TOKEN_ID
         else:
@@ -321,10 +320,8 @@ class CoarseRadixModel(nn.Module):
         return (
             logits,
             (
-                state,
                 torch.stack(invariant_losses).mean(),
                 torch.stack(entropies).mean(),
-                modulus_digits,
             ),
         )
 
@@ -564,59 +561,17 @@ def token_training_loss(batch: TokenLossBatch) -> Tensor:
     )
     sequence_loss = sequence_losses[valid_rows].mean()
 
-    target_values = torch.zeros(
-        batch.labels.shape[0],
-        device=batch.labels.device,
-        dtype=torch.long,
-    )
-    for position in range(batch.labels.shape[1]):
-        valid = batch.valid_mask[:, position]
-        digit = (batch.labels[:, position] - DIGIT_OFFSET).clamp(
-            min=0,
-            max=NUM_DECIMAL_DIGITS - 1,
-        )
-        target_values = torch.where(
-            valid,
-            target_values * 10 + digit,
-            target_values,
-        )
-    if not isinstance(batch.auxiliary, tuple) or len(batch.auxiliary) != 4:
+    if not isinstance(batch.auxiliary, tuple) or len(batch.auxiliary) != 2:
         raise TypeError(
-            "auxiliary output must contain endpoint state and modulus digits",
+            "auxiliary output must contain invariant loss and entropy",
         )
-    endpoint_state, invariant_loss, entropy, modulus_digits = batch.auxiliary
-    if not isinstance(endpoint_state, Tensor) or endpoint_state.ndim != 2:
-        raise TypeError("endpoint state must be a rank-two tensor")
+    invariant_loss, entropy = batch.auxiliary
     if not isinstance(invariant_loss, Tensor) or invariant_loss.ndim != 0:
         raise TypeError("invariant loss must be a scalar tensor")
     if not isinstance(entropy, Tensor) or entropy.ndim != 0:
         raise TypeError("entropy must be a scalar tensor")
-    if not isinstance(modulus_digits, Tensor):
-        raise TypeError("modulus digits must be a tensor")
-    radix_powers = RADIX ** torch.arange(
-        STATE_DIGITS,
-        device=batch.labels.device,
-        dtype=torch.float32,
-    )
-    predicted_values = torch.einsum(
-        "bd,d->b",
-        endpoint_state.float(),
-        radix_powers,
-    )
-    modulus_values = torch.einsum(
-        "bd,d->b",
-        modulus_digits.float(),
-        radix_powers,
-    )
-    normalized_endpoint_error = (
-        predicted_values - target_values.float()
-    ) / modulus_values
-    endpoint_loss = (
-        torch.log1p(normalized_endpoint_error.abs()).square()[valid_rows].mean()
-    )
     return (
         sequence_loss
-        + ENDPOINT_WEIGHT * endpoint_loss
         + INVARIANT_WEIGHT * invariant_loss.float()
         + ENTROPY_WEIGHT * entropy.float()
     )
