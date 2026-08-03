@@ -1151,3 +1151,41 @@ Final loss improved only from 64.37 to 63.83 on E3 and from 56.69 to 56.51 on E4
 The counterintuitive stability hypothesis is supported, but its implied accuracy hypothesis is rejected: additional tied latent quotient computation remains useless when earlier refinements receive neither stable end-to-end credit nor their own identifying signal.
 No hosted quota was consumed, and the hosted README and DuckDB results remain unchanged.
 The next intuitive experiment should return to L26's faster shallow quotient head and replace its exponentially saturating sigmoid quotient link with a smooth algebraically bounded link, testing whether polynomial-tail gradients can reduce the persistently large interval loss without sacrificing the valid quotient range or complete suite coverage.
+
+## L32: Algebraically bounded quotient link
+
+Date: 2026-08-03.
+
+Idea class: intuitive.
+
+Status: rejected before hosted submission.
+
+The hypothesis was that L26's sigmoid quotient output entered exponentially saturated tails before the interval objective could recover incorrect local quotients.
+L32 returned exactly to L26's 22,337-element shallow quotient architecture, low-frequency inputs, endpoint-free interval and lattice losses, exact positional normalization, six tied Horner steps, detached Fourier decoder, optimizer, schedule, and rounded evaluation recurrence.
+It changed only the quotient link from a sigmoid to a smooth algebraically bounded function with polynomial-tail gradients.
+Scaling its input by one half matched the sigmoid link's central derivative exactly at 7.5 while preserving the same open output range from zero to 30.
+A direct numerical check measured a link derivative of 0.0566 at absolute logit 10 versus 0.00136 for the sigmoid, and a representative transition produced finite outputs and gradients.
+The change added no state, label, table, enumeration, branch, solver operation, range-dependent parameter, or specialized T computation.
+
+The frozen candidate was screened with the same official datasets, splits, Apple M2 Pro device, 30-second Easy budgets, and 60-second Medium budgets as L26.
+
+| Dataset | Updates | Test | OOD | Mean exact accuracy | Max T | OOD N Max T |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| E1 | 406 | 6.67% | 10.00% | 8.33% | <1 | <1 |
+| E2 | 360 | 0.42% | 0.33% | 0.38% | <1 | <1 |
+| E3 | 627 | 1.25% | 2.37% | 1.81% | <1 | <1 |
+| E4 | 622 | 0.37% | 1.33% | 0.85% | <1 | <1 |
+| E5 | 408 | 1.33% | 1.50% | 1.42% | <1 | <1 |
+| M1 | 206 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| M2 | 203 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| M3 | 1,086 | 0.50% | 0.47% | 0.48% | <1 | <1 |
+| M4 | 290 | 0.01% | 0.00% | 0.01% | <1 | <1 |
+| M5 | 324 | 0.06% | 0.07% | 0.06% | <1 | <1 |
+
+The algebraic link retained complete numerical coverage but did not escape the quotient plateau.
+E3, E4, and M3 reproduced L26's exact test and OOD counts, and every familiar- and unseen-modulus profile failed at T=1.
+E1 returned to a recurring marginal count, E2 worsened, E5 gained one OOD example, M4 merely moved one correct example from OOD to test, and M5 remained chance-scale.
+The continuous objective did not improve consistently: final loss moved from 64.01 to 63.26 on E3, from 55.81 to 56.47 on E4, and from 47.58 to 47.85 on M3.
+Polynomial-tail gradients therefore remained available as designed but neither reduced loss broadly nor changed material hard decisions, rejecting sigmoid tail saturation as the operative bottleneck.
+No hosted quota was consumed, and the hosted README and DuckDB results remain unchanged.
+The next counterintuitive experiment should return to L26's sigmoid link and detach the recurrent residue state after every training-time squaring transition while preserving identical forward values and full evaluation recurrence, testing whether local invariant credit is obscured by backpropagation through off-manifold states across requested T steps.

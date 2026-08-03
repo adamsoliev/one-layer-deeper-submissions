@@ -1,4 +1,4 @@
-"""Truncated-credit coarse-radix recurrence for modular squaring."""
+"""Algebraic-link coarse-radix recurrence for modular squaring."""
 
 from __future__ import annotations
 
@@ -22,7 +22,6 @@ STATE_DIGITS = 6
 EXTENDED_DIGITS = STATE_DIGITS + 1
 OUTPUT_DIGITS = 8
 WIDTH = 96
-QUOTIENT_REFINEMENT_STEPS = 4
 FOURIER_HARMONICS = 8
 MAX_TRAIN_TIME_STEPS = 16
 MAX_EVAL_TIME_STEPS = 64
@@ -60,11 +59,12 @@ class CoarseRadixSquare(nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.quotient_encoder = nn.Sequential(
+        self.quotient_trunk = nn.Sequential(
             nn.Linear(9, WIDTH),
             nn.SiLU(),
+            nn.Linear(WIDTH, WIDTH),
+            nn.SiLU(),
         )
-        self.quotient_refiner = nn.GRUCell(WIDTH, WIDTH)
         self.quotient_head = nn.Linear(WIDTH, 1)
         self.register_buffer(
             "state_powers_float",
@@ -158,17 +158,17 @@ class CoarseRadixSquare(nn.Module):
                 ),
                 dim=-1,
             ).to(multiplicand.dtype)
-            quotient_encoding = self.quotient_encoder(quotient_features)
-            quotient_hidden = quotient_encoding
-            for refinement_step in range(QUOTIENT_REFINEMENT_STEPS):
-                quotient_hidden = self.quotient_refiner(
-                    quotient_encoding,
-                    quotient_hidden,
+            quotient_hidden = self.quotient_trunk(quotient_features)
+            quotient_logit = self.quotient_head(quotient_hidden).squeeze(-1)
+            scaled_quotient_logit = 0.5 * quotient_logit
+            soft_quotient = (
+                0.5
+                * QUOTIENT_MAX
+                * (
+                    1.0
+                    + scaled_quotient_logit
+                    * torch.rsqrt(1.0 + scaled_quotient_logit.square())
                 )
-                if self.training and refinement_step + 1 < QUOTIENT_REFINEMENT_STEPS:
-                    quotient_hidden = quotient_hidden.detach()
-            soft_quotient = QUOTIENT_MAX * torch.sigmoid(
-                self.quotient_head(quotient_hidden).squeeze(-1),
             )
             quotient = relaxed_or_rounded(soft_quotient, hard=hard)
 
@@ -260,7 +260,7 @@ class CoarseRadixModel(nn.Module):
 
     @staticmethod
     def _initialize(module: nn.Module) -> None:
-        if isinstance(module, (nn.Linear, nn.GRUCell)):
+        if isinstance(module, nn.Linear):
             for name, parameter in module.named_parameters(recurse=False):
                 if "weight" in name:
                     nn.init.normal_(parameter, mean=0.0, std=0.02)
