@@ -1,4 +1,4 @@
-"""Locally constrained coarse-radix recurrence for modular squaring."""
+"""Lattice-relaxed coarse-radix recurrence for modular squaring."""
 
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ MIN_LEARNING_RATE_RATIO = 0.05
 WARMUP_FRACTION = 0.05
 INVARIANT_WEIGHT = 0.5
 ENTROPY_WEIGHT = 0.002
+LATTICE_WEIGHT = 1.0
 WEAK_DIGIT_TEMPERATURE = 0.25
 PAD_TOKEN_ID = 0
 X_TOKEN_ID = 3
@@ -48,10 +49,9 @@ class Config:
         self.max_seq_len = max_seq_len
 
 
-def straight_through_round(value: Tensor, *, hard: bool) -> Tensor:
-    """Compose integer carries while retaining an identity gradient."""
-    rounded = value.round()
-    return rounded if hard else rounded + value - value.detach()
+def relaxed_or_rounded(value: Tensor, *, hard: bool) -> Tensor:
+    """Use a continuous training quotient and an integer evaluation quotient."""
+    return value.round() if hard else value
 
 
 class CoarseRadixSquare(nn.Module):
@@ -162,7 +162,7 @@ class CoarseRadixSquare(nn.Module):
             soft_quotient = QUOTIENT_MAX * torch.sigmoid(
                 self.quotient_head(quotient_hidden).squeeze(-1),
             )
-            quotient = straight_through_round(soft_quotient, hard=hard)
+            quotient = relaxed_or_rounded(soft_quotient, hard=hard)
 
             raw_coefficients = (
                 candidate_coefficients - quotient[:, None] * extended_modulus
@@ -184,7 +184,8 @@ class CoarseRadixSquare(nn.Module):
             )
             invariant_losses.append(
                 torch.log1p(below_zero).square().mean()
-                + torch.log1p(above_modulus).square().mean(),
+                + torch.log1p(above_modulus).square().mean()
+                + LATTICE_WEIGHT * torch.sin(math.pi * soft_quotient).square().mean(),
             )
 
         return (

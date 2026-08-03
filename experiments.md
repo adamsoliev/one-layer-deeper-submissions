@@ -914,3 +914,43 @@ The local objective remained far from solved despite stable additional optimizat
 Global endpoint gradients were therefore the source of the exact-normalizer's numerical instability, but removing them exposed a second independent failure: hard recurrent interval loss is a poor optimization surrogate for learning the shared quotient rule.
 The counterintuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
 The next intuitive experiment should train a continuous quotient and continuous normalized residue trajectory, add an unlabeled integer-lattice penalty to make quotient estimates converge toward discrete values, and retain the exact rounded recurrence for evaluation, testing whether a smooth local path can solve interval feasibility without reopening global endpoint instability.
+
+## L26: Integer-lattice relaxed trajectory
+
+Date: 2026-08-02.
+
+Idea class: intuitive.
+
+Status: rejected before hosted submission.
+
+The hypothesis was that L25's local interval objective was uniquely identifying but difficult to optimize because hard straight-through quotient choices immediately created discontinuous off-manifold recurrent states.
+L26 retained L25's 22,337-element architecture, endpoint-free training, scalar quotient MLP, six tied Horner steps, exact positional normalization, detached Fourier decoder, optimizer, schedule, and hard rounded evaluation recurrence.
+During training only, it used the continuous quotient estimate directly, producing fractional but value-preserving normalized residue digits.
+It added a unit-weight `sin(pi * q)^2` lattice penalty at every Horner step.
+Interval feasibility has width below one quotient unit, so the only integer that jointly zeros the range and lattice terms is the correct local quotient, without requiring an intermediate label.
+A float64 algebra check verified fractional positional reconstruction to summation precision and finite surrogate gradients.
+The change added no learned state, label, table, branch, enumeration, solver operation, or specialized T computation.
+
+The frozen candidate was screened with the same official datasets, splits, Apple M2 Pro device, 30-second Easy budgets, and 60-second Medium budgets as L25.
+
+| Dataset | Updates | Test | OOD | Mean exact accuracy | Max T | OOD N Max T |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| E1 | 380 | 4.00% | 9.00% | 6.50% | <1 | <1 |
+| E2 | 321 | 1.04% | 0.67% | 0.85% | <1 | <1 |
+| E3 | 804 | 1.25% | 2.37% | 1.81% | <1 | <1 |
+| E4 | 791 | 0.37% | 1.33% | 0.85% | <1 | <1 |
+| E5 | 388 | 1.33% | 1.33% | 1.33% | <1 | <1 |
+| M1 | 216 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| M2 | 213 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| M3 | 1,105 | 0.50% | 0.47% | 0.48% | <1 | <1 |
+| M4 | 298 | 0.00% | 0.01% | 0.01% | <1 | <1 |
+| M5 | 296 | 0.04% | 0.10% | 0.07% | <1 | <1 |
+
+All ten suites completed without numerical failure, preserving L25's restored coverage, but every depth profile still failed at T=1.
+E3 and E4 reproduced L25's exact split counts.
+E2 gained three total examples, while E1 lost five, E5 and M4 each lost one, M5 lost five, and M1, M2, and M3 were unchanged.
+The relaxed objective did optimize slightly on the targets: despite including the additional nonnegative lattice term, final total loss fell from 65.80 to 64.01 on E3 and from 56.94 to 55.81 on E4.
+That improvement did not alter a single hard target prediction after 804 and 791 updates, and the broader suite regressed.
+Continuous local credit therefore creates another relaxation gap: it marginally improves the training trajectory but does not bring quotient estimates onto the integer decisions used by evaluation.
+The intuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
+The next counterintuitive experiment should retain the smooth endpoint-free trajectory but replace the mathematically valid on-manifold `[0, 30]` sigmoid quotient bound with an unbounded positive field, allowing the learned divider to repair off-manifold recurrent states whose required quotient exceeds 30 instead of saturating permanently after an early error.
