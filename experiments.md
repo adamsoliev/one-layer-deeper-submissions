@@ -689,3 +689,40 @@ The added pressure kept total final losses at 3.42--3.61 rather than L18's easie
 Final-state agreement partially repaired the relaxation gap but neither identified the correct hard circuit nor justified its fixed-budget compute cost, especially as recurrent depth grew.
 The counterintuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
 The next intuitive experiment should replace the one-shot parallel quotient predictor with a tied coarse-radix serial reducer: factor each large quotient digit into small categorical components, preserve value locally at every Horner step, and spend latent depth directly on the ordered division dependency rather than on two approximate global trajectories.
+
+## L20: Factorized coarse-radix serial reducer
+
+Date: 2026-08-02.
+
+Idea class: intuitive.
+
+Status: rejected before hosted submission because one required suite failed.
+
+The hypothesis was that L8 through L19 failed because they predicted all quotient digits in parallel even though modular division has an ordered most-significant-first dependency, and that explicitly spending tied latent depth on this dependency would make each local reduction identifiable.
+L20 replaced the parallel architecture with a base-16 Horner reducer over six state digits, preserving the same 24-bit representable range with half as many serial microsteps as L6's base-4 design.
+Each step formed `16 * accumulator + multiplier_digit * x`, predicted its quotient digit as one binary high component plus one hexadecimal low component, subtracted that multiple of the modulus, and used one shared low-to-high GRU to normalize seven coefficients into hexadecimal digits and integer carries.
+The seventh coefficient fixed L6's truncation of overflow created by shifting the six-digit accumulator.
+Worst unnormalized coefficient constraints and final-answer base-16 supervision trained the hard straight-through circuit, while the Fourier decoder remained label-isolated.
+The architecture used 39,708 persistent state elements, tied all serial components, and added no intermediate labels, lookup memory, residue table, range enumeration, dataset branch, or T-specialized operator.
+
+The frozen candidate was screened with the same official datasets, splits, Apple M2 Pro device, 30-second Easy budgets, and 60-second Medium budgets as L19.
+
+| Dataset | Updates | Test | OOD | Mean exact accuracy | Max T | OOD N Max T |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| E1 | 112 | 6.67% | 10.00% | 8.33% | <1 | <1 |
+| E2 | 126 | 0.21% | 0.00% | 0.10% | <1 | <1 |
+| E3 | 510 | 1.25% | 2.37% | 1.81% | <1 | <1 |
+| E4 | 504 | 0.12% | 0.17% | 0.15% | <1 | <1 |
+| E5 | 146 | 0.08% | 0.00% | 0.04% | <1 | <1 |
+| M1 | 47 | failed: non-finite loss | failed | failed | failed | failed |
+| M2 | 77 | 0.49% | 0.66% | 0.57% | <1 | <1 |
+| M3 | 517 | 0.29% | 0.33% | 0.31% | <1 | <1 |
+| M4 | 106 | 0.03% | 0.04% | 0.04% | <1 | <1 |
+| M5 | 97 | 0.41% | 0.33% | 0.37% | <1 | <1 |
+
+E3 returned to the recurring 1.81% decoder marginal, but E4 collapsed to 0.15%, E5 to 0.04%, and long-depth M4 to 0.04%; no successful suite certified T=1.
+M1 failed the required coverage gate when its training loss became non-finite at update 47.
+Even successful suites retained very large final total losses, from 6.88 on E3 to 159.83 on E1, rather than approaching the roughly 2.3 decoder scale, showing that the local algebraic system remained unsolved.
+The corrected ordered computation therefore did not make the factorized hard quotient/carry decisions learnable under the fixed clock, and its six Horner calls per requested square reduced deeper-family updates to 77--112 before evaluation.
+The intuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
+The next counterintuitive experiment should retain the correct serial Horner structure but replace the binary-plus-hexadecimal quotient categories with one continuous scalar quotient field followed by straight-through integer rounding, testing whether a low-dimensional monotone regression can solve the local division step without the combinatorial categorical landscape.

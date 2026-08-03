@@ -1,4 +1,4 @@
-"""Agreement-coupled dual recurrence for modular squaring."""
+"""Factorized coarse-radix recurrence for repeated modular squaring."""
 
 from __future__ import annotations
 
@@ -17,14 +17,13 @@ from benchmark import (
 )
 from torch import Tensor, nn
 
-RADIX = 4
-STATE_DIGITS = 12
-PRODUCT_DIGITS = 2 * STATE_DIGITS
+RADIX = 16
+STATE_DIGITS = 6
+EXTENDED_DIGITS = STATE_DIGITS + 1
 OUTPUT_DIGITS = 8
-WIDTH = 64
-HIDDEN_WIDTH = 128
+WIDTH = 96
+CARRY_WIDTH = 64
 FOURIER_HARMONICS = 8
-REFINEMENT_DILATIONS = (1, 2, 4, 8)
 MAX_TRAIN_TIME_STEPS = 16
 MAX_EVAL_TIME_STEPS = 64
 TRAIN_BATCH_SIZE = 128
@@ -36,7 +35,6 @@ WARMUP_FRACTION = 0.05
 SEMANTIC_RADIX_WEIGHT = 0.75
 INVARIANT_WEIGHT = 0.5
 ENTROPY_WEIGHT = 0.002
-AGREEMENT_WEIGHT = 1.0
 WEAK_DIGIT_TEMPERATURE = 0.25
 CONSTRAINT_TEMPERATURE = 0.1
 PAD_TOKEN_ID = 0
@@ -44,7 +42,9 @@ X_TOKEN_ID = 3
 T_TOKEN_ID = 4
 DIGIT_OFFSET = 7
 NUM_DECIMAL_DIGITS = 10
-MAX_PRODUCT_COEFFICIENT = STATE_DIGITS * (RADIX - 1) ** 2
+QUOTIENT_HIGH_RADIX = 2
+QUOTIENT_MAX = 2 * RADIX - 2
+MAX_RAW_COEFFICIENT = QUOTIENT_MAX * (RADIX - 1)
 
 
 class Config:
@@ -53,286 +53,282 @@ class Config:
         self.max_seq_len = max_seq_len
 
 
-class RMSNorm(nn.Module):
-    def __init__(self, width: int) -> None:
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(width))
-
-    def forward(self, hidden: Tensor) -> Tensor:
-        return F.rms_norm(
-            hidden,
-            (hidden.shape[-1],),
-            self.weight,
-            eps=1e-5,
-        )
-
-
-def relaxed_choice(
+def straight_through_choice(
     logits: Tensor,
     choices: Tensor,
     temperature: float,
     *,
-    mode: str,
+    hard: bool,
 ) -> tuple[Tensor, Tensor]:
-    """Compose soft, hard-ST, or hard categorical values."""
+    """Compose categorical values with a hard training forward pass."""
     probabilities = F.softmax(
         logits.float() / max(temperature, 0.05),
         dim=-1,
     ).to(logits.dtype)
     soft_value = torch.einsum("...k,k->...", probabilities, choices)
     hard_value = choices[probabilities.argmax(dim=-1)]
-    if mode == "soft":
-        value = soft_value
-    elif mode == "straight_through":
-        value = hard_value + soft_value - soft_value.detach()
-    elif mode == "hard":
-        value = hard_value
-    else:
-        raise ValueError(f"unsupported choice mode: {mode}")
+    value = hard_value if hard else hard_value + soft_value - soft_value.detach()
     entropy = -(probabilities * probabilities.clamp_min(1e-8).log()).sum(dim=-1)
     return value, entropy
 
 
-def composed_round(value: Tensor, *, mode: str) -> Tensor:
-    """Compose soft, hard-ST, or hard carry values."""
+def straight_through_round(value: Tensor, *, hard: bool) -> Tensor:
+    """Compose integer carries while retaining an identity gradient."""
     rounded = value.round()
-    if mode == "soft":
-        return value
-    if mode == "straight_through":
-        return rounded + value - value.detach()
-    if mode == "hard":
-        return rounded
-    raise ValueError(f"unsupported choice mode: {mode}")
+    return rounded if hard else rounded + value - value.detach()
 
 
-class SharedDilatedBlock(nn.Module):
-    """Reuse one local nonlinear update at exponentially growing spans."""
+class CoarseRadixSquare(nn.Module):
+    """Reduce one square by tied most-significant-first Horner steps."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.input_norm = RMSNorm(WIDTH)
-        self.local_weight = nn.Parameter(torch.empty(WIDTH, WIDTH, 3))
-        self.local_bias = nn.Parameter(torch.empty(WIDTH))
-        self.left = nn.Linear(2 * WIDTH, HIDDEN_WIDTH)
-        self.right = nn.Linear(2 * WIDTH, HIDDEN_WIDTH)
-        self.output = nn.Linear(HIDDEN_WIDTH, WIDTH)
-        self.gate = nn.Linear(2 * WIDTH, WIDTH)
-        self.output_norm = RMSNorm(WIDTH)
-        nn.init.normal_(self.local_weight, mean=0.0, std=0.02)
-        nn.init.normal_(self.local_bias, mean=0.0, std=0.002)
-
-    def forward(self, state: Tensor, dilation: int) -> Tensor:
-        normalized = self.input_norm(state)
-        local = F.conv1d(
-            normalized.transpose(1, 2),
-            self.local_weight,
-            self.local_bias,
-            padding=dilation,
-            dilation=dilation,
-        ).transpose(1, 2)
-        features = torch.cat((normalized, local), dim=-1)
-        hidden = F.silu(self.left(features)) * torch.tanh(self.right(features))
-        update = self.output(hidden)
-        gate = torch.sigmoid(self.gate(features))
-        return self.output_norm(state + gate * update)
-
-
-class ParallelRadixSquare(nn.Module):
-    """Predict quotient digits and canonicalize their residual in parallel."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.product_projection = nn.Linear(8, WIDTH)
-        self.quotient_block = SharedDilatedBlock()
-        self.quotient_head = nn.Linear(WIDTH, RADIX)
-        self.residual_projection = nn.Linear(9, WIDTH)
-        self.canonical_block = SharedDilatedBlock()
-        self.carry_head = nn.Linear(WIDTH, 1)
-        self.digit_head = nn.Linear(WIDTH, RADIX)
+        self.quotient_trunk = nn.Sequential(
+            nn.Linear(9, WIDTH),
+            nn.SiLU(),
+            nn.Linear(WIDTH, WIDTH),
+            nn.SiLU(),
+        )
+        self.quotient_high_head = nn.Linear(WIDTH, QUOTIENT_HIGH_RADIX)
+        self.quotient_low_head = nn.Linear(WIDTH, RADIX)
+        self.carry_scan = nn.GRU(10, CARRY_WIDTH, batch_first=True)
+        self.carry_head = nn.Linear(CARRY_WIDTH, 1)
+        self.digit_head = nn.Linear(CARRY_WIDTH, RADIX)
+        self.register_buffer(
+            "high_choices",
+            torch.arange(QUOTIENT_HIGH_RADIX, dtype=torch.float32),
+        )
         self.register_buffer(
             "digit_choices",
             torch.arange(RADIX, dtype=torch.float32),
         )
-        coefficient_map = torch.zeros(
-            STATE_DIGITS,
-            STATE_DIGITS,
-            PRODUCT_DIGITS,
-        )
-        for left in range(STATE_DIGITS):
-            for right in range(STATE_DIGITS):
-                coefficient_map[left, right, left + right] = 1.0
-        self.register_buffer("coefficient_map", coefficient_map)
         self.register_buffer(
-            "radix_powers_float",
+            "state_powers_float",
             RADIX ** torch.arange(STATE_DIGITS, dtype=torch.float32),
         )
-        positions = torch.linspace(0.0, 1.0, PRODUCT_DIGITS)
-        self.register_buffer("product_positions", positions)
+        self.register_buffer(
+            "extended_powers_float",
+            RADIX ** torch.arange(EXTENDED_DIGITS, dtype=torch.float32),
+        )
+        self.register_buffer(
+            "digit_indices",
+            torch.arange(STATE_DIGITS, dtype=torch.long),
+        )
+        self.register_buffer(
+            "extended_positions",
+            torch.linspace(0.0, 1.0, EXTENDED_DIGITS),
+        )
 
     def forward(
         self,
-        residue_digits: Tensor,
+        multiplicand: Tensor,
         modulus_digits: Tensor,
         temperature: float,
-        choice_mode: str,
+        hard: bool,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        product_coefficients = torch.einsum(
-            "bi,bj,ijk->bk",
-            residue_digits,
-            residue_digits,
-            self.coefficient_map.to(residue_digits.dtype),
-        )
-        extended_residue = F.pad(
-            residue_digits,
-            (0, PRODUCT_DIGITS - STATE_DIGITS),
-        )
-        extended_modulus = F.pad(
-            modulus_digits,
-            (0, PRODUCT_DIGITS - STATE_DIGITS),
-        )
-        positions = self.product_positions.to(residue_digits.dtype)[None, :].expand(
-            residue_digits.shape[0],
-            -1,
-        )
-        product_features = self._product_features(
-            product_coefficients,
-            extended_residue,
-            extended_modulus,
-            positions,
-        )
-        quotient_state = self.product_projection(product_features)
-        for dilation in REFINEMENT_DILATIONS:
-            quotient_state = self.quotient_block(quotient_state, dilation)
-        quotient_logits = self.quotient_head(
-            quotient_state[:, :STATE_DIGITS],
-        )
-        quotient_digits, quotient_entropy = relaxed_choice(
-            quotient_logits,
-            self.digit_choices.to(quotient_logits.dtype),
-            temperature,
-            mode=choice_mode,
-        )
-        quotient_product = torch.einsum(
-            "bi,bj,ijk->bk",
-            quotient_digits,
-            modulus_digits,
-            self.coefficient_map.to(quotient_digits.dtype),
-        )
-        raw_coefficients = product_coefficients - quotient_product
-        residual_features = self._residual_features(
-            raw_coefficients,
-            product_coefficients,
-            extended_residue,
-            extended_modulus,
-            positions,
-        )
-        canonical_state = self.residual_projection(residual_features)
-        for dilation in REFINEMENT_DILATIONS:
-            canonical_state = self.canonical_block(canonical_state, dilation)
-        carries = composed_round(
-            self.carry_head(canonical_state).squeeze(-1),
-            mode=choice_mode,
-        )
-        residue_logits = self.digit_head(
-            canonical_state[:, :STATE_DIGITS],
-        )
-        next_digits, residue_entropy = relaxed_choice(
-            residue_logits,
-            self.digit_choices.to(residue_logits.dtype),
-            temperature,
-            mode=choice_mode,
-        )
-
-        incoming_carries = F.pad(carries[:, :-1], (1, 0))
-        normalized_coefficients = raw_coefficients + incoming_carries - RADIX * carries
-        target_coefficients = F.pad(
-            next_digits,
-            (0, PRODUCT_DIGITS - STATE_DIGITS),
-        )
-        coefficient_constraints = torch.cat(
-            (
-                (normalized_coefficients - target_coefficients).abs(),
-                carries[:, -1:].abs(),
-            ),
-            dim=1,
-        )
-        constraint_magnitudes = torch.log1p(coefficient_constraints)
-        smooth_worst_constraint = CONSTRAINT_TEMPERATURE * (
-            torch.logsumexp(
-                constraint_magnitudes / CONSTRAINT_TEMPERATURE,
-                dim=1,
-            )
-            - math.log(coefficient_constraints.shape[1])
-        )
-        residue_value = torch.einsum(
-            "bd,d->b",
-            next_digits.float(),
-            self.radix_powers_float,
+        accumulator = torch.zeros_like(multiplicand)
+        final_digit_logits = multiplicand.new_zeros(
+            multiplicand.shape[0],
+            STATE_DIGITS,
+            RADIX,
         )
         modulus_value = torch.einsum(
             "bd,d->b",
             modulus_digits.float(),
-            self.radix_powers_float,
+            self.state_powers_float,
         )
-        denominator = modulus_value.clamp_min(1.0)
-        below_zero = F.relu(-residue_value / denominator)
-        above_modulus = F.relu(
-            (residue_value - (modulus_value - 1.0)) / denominator,
+        multiplicand_value = torch.einsum(
+            "bd,d->b",
+            multiplicand.float(),
+            self.state_powers_float,
         )
-        invariant_loss = (
-            smooth_worst_constraint.square().mean()
-            + torch.log1p(below_zero).square().mean()
-            + torch.log1p(above_modulus).square().mean()
-        )
-        entropy = quotient_entropy.float().mean() + residue_entropy.float().mean()
-        return next_digits, residue_logits, invariant_loss, entropy
+        highest_digit = (
+            (modulus_digits > 0).long() * self.digit_indices[None, :]
+        ).amax(dim=1)
+        invariant_losses: list[Tensor] = []
+        entropies: list[Tensor] = []
 
-    @staticmethod
-    def _product_features(
-        product: Tensor,
-        residue: Tensor,
-        modulus: Tensor,
-        positions: Tensor,
-    ) -> Tensor:
-        normalized_product = product / MAX_PRODUCT_COEFFICIENT
-        logarithm = torch.log1p(product) / math.log1p(
-            MAX_PRODUCT_COEFFICIENT,
-        )
-        residue = residue / (RADIX - 1)
-        modulus = modulus / (RADIX - 1)
-        return torch.stack(
-            (
-                normalized_product,
-                logarithm,
-                residue,
-                modulus,
-                residue * modulus,
-                positions,
-                torch.sin(2.0 * math.pi * positions),
-                torch.cos(2.0 * math.pi * positions),
-            ),
-            dim=-1,
+        for rank in range(STATE_DIGITS):
+            active_indices = torch.nonzero(
+                highest_digit >= rank,
+                as_tuple=False,
+            ).squeeze(-1)
+            if active_indices.numel() == 0:
+                break
+            active_accumulator = accumulator[active_indices]
+            active_multiplicand = multiplicand[active_indices]
+            active_modulus = modulus_digits[active_indices]
+            active_modulus_value = modulus_value[active_indices]
+            digit_indices = highest_digit[active_indices] - rank
+            multiplier_digit = active_multiplicand.gather(
+                1,
+                digit_indices[:, None],
+            ).squeeze(1)
+
+            extended_accumulator = F.pad(active_accumulator, (0, 1))
+            extended_multiplicand = F.pad(active_multiplicand, (0, 1))
+            extended_modulus = F.pad(active_modulus, (0, 1))
+            shifted_accumulator = F.pad(
+                extended_accumulator[:, :-1],
+                (1, 0),
+            )
+            candidate_coefficients = (
+                shifted_accumulator + multiplier_digit[:, None] * extended_multiplicand
+            )
+            accumulator_value = torch.einsum(
+                "bd,d->b",
+                active_accumulator.float(),
+                self.state_powers_float,
+            )
+            candidate_value = torch.einsum(
+                "bd,d->b",
+                candidate_coefficients.float(),
+                self.extended_powers_float,
+            )
+            denominator = active_modulus_value.clamp_min(1.0)
+            candidate_ratio = candidate_value / denominator
+            rank_feature = torch.full_like(
+                candidate_ratio,
+                rank / max(STATE_DIGITS - 1, 1),
+            )
+            quotient_features = torch.stack(
+                (
+                    candidate_ratio / (QUOTIENT_MAX + 1.0),
+                    torch.tanh(candidate_ratio / RADIX),
+                    accumulator_value / denominator,
+                    multiplicand_value[active_indices] / denominator,
+                    multiplier_digit.float() / (RADIX - 1),
+                    torch.log1p(denominator) / math.log(16_777_217.0),
+                    rank_feature,
+                    torch.sin(math.pi * candidate_ratio / RADIX),
+                    torch.cos(math.pi * candidate_ratio / RADIX),
+                ),
+                dim=-1,
+            ).to(multiplicand.dtype)
+            quotient_hidden = self.quotient_trunk(quotient_features)
+            high_logits = self.quotient_high_head(quotient_hidden)
+            quotient_high, high_entropy = straight_through_choice(
+                high_logits,
+                self.high_choices.to(high_logits.dtype),
+                temperature,
+                hard=hard,
+            )
+            low_logits = self.quotient_low_head(quotient_hidden)
+            quotient_low, low_entropy = straight_through_choice(
+                low_logits,
+                self.digit_choices.to(low_logits.dtype),
+                temperature,
+                hard=hard,
+            )
+            quotient = RADIX * quotient_high + quotient_low
+
+            raw_coefficients = (
+                candidate_coefficients - quotient[:, None] * extended_modulus
+            )
+            carry_features = self._carry_features(
+                raw_coefficients,
+                extended_accumulator,
+                extended_multiplicand,
+                extended_modulus,
+                quotient,
+                multiplier_digit,
+            )
+            carry_state, _ = self.carry_scan(carry_features)
+            soft_carries = self.carry_head(carry_state).squeeze(-1)
+            carries = straight_through_round(soft_carries, hard=hard)
+            digit_logits = self.digit_head(carry_state)
+            next_digits, digit_entropy = straight_through_choice(
+                digit_logits,
+                self.digit_choices.to(digit_logits.dtype),
+                temperature,
+                hard=hard,
+            )
+            incoming_carries = F.pad(carries[:, :-1], (1, 0))
+            normalized_coefficients = (
+                raw_coefficients + incoming_carries - RADIX * carries
+            )
+            accumulator = accumulator.index_copy(
+                0,
+                active_indices,
+                next_digits[:, :STATE_DIGITS],
+            )
+            final_digit_logits = final_digit_logits.index_copy(
+                0,
+                active_indices,
+                digit_logits[:, :STATE_DIGITS],
+            )
+
+            reduced_value = candidate_value - quotient.float() * active_modulus_value
+            represented_value = torch.einsum(
+                "bd,d->b",
+                next_digits.float(),
+                self.extended_powers_float,
+            )
+            coefficient_constraints = torch.cat(
+                (
+                    (normalized_coefficients - next_digits).abs(),
+                    carries[:, -1:].abs(),
+                ),
+                dim=1,
+            )
+            constraint_magnitudes = torch.log1p(coefficient_constraints)
+            smooth_worst_constraint = CONSTRAINT_TEMPERATURE * (
+                torch.logsumexp(
+                    constraint_magnitudes / CONSTRAINT_TEMPERATURE,
+                    dim=1,
+                )
+                - math.log(coefficient_constraints.shape[1])
+            )
+            below_zero = F.relu(-reduced_value / denominator)
+            above_modulus = F.relu(
+                (reduced_value - (active_modulus_value - 1.0)) / denominator,
+            )
+            representation_error = (
+                represented_value - reduced_value
+            ).abs() / denominator
+            invariant_losses.append(
+                smooth_worst_constraint.square().mean()
+                + torch.log1p(below_zero).square().mean()
+                + torch.log1p(above_modulus).square().mean()
+                + torch.log1p(representation_error).square().mean(),
+            )
+            entropies.append(
+                high_entropy.float().mean()
+                + low_entropy.float().mean()
+                + digit_entropy.float().mean(),
+            )
+
+        return (
+            accumulator,
+            final_digit_logits,
+            torch.stack(invariant_losses).mean(),
+            torch.stack(entropies).mean(),
         )
 
-    @staticmethod
-    def _residual_features(
+    def _carry_features(
+        self,
         raw: Tensor,
-        product: Tensor,
-        residue: Tensor,
+        accumulator: Tensor,
+        multiplicand: Tensor,
         modulus: Tensor,
-        positions: Tensor,
+        quotient: Tensor,
+        multiplier: Tensor,
     ) -> Tensor:
-        scale = MAX_PRODUCT_COEFFICIENT + 1.0
-        residue = residue / (RADIX - 1)
-        modulus = modulus / (RADIX - 1)
+        positions = self.extended_positions.to(raw.dtype)[None, :].expand(
+            raw.shape[0],
+            -1,
+        )
+        normalized_quotient = quotient[:, None] / (QUOTIENT_MAX + 1.0)
+        normalized_multiplier = multiplier[:, None] / (RADIX - 1)
         return torch.stack(
             (
-                raw / scale,
+                raw / (MAX_RAW_COEFFICIENT + 1.0),
                 torch.tanh(raw / RADIX),
-                product / MAX_PRODUCT_COEFFICIENT,
-                residue,
-                modulus,
-                residue * modulus,
+                accumulator / (RADIX - 1),
+                multiplicand / (RADIX - 1),
+                modulus / (RADIX - 1),
+                normalized_quotient.expand_as(raw),
+                normalized_multiplier.expand_as(raw),
                 positions,
                 torch.sin(2.0 * math.pi * positions),
                 torch.cos(2.0 * math.pi * positions),
@@ -341,13 +337,13 @@ class ParallelRadixSquare(nn.Module):
         )
 
 
-class ParallelCarryModel(nn.Module):
-    """Compose one parallel learned radix circuit per requested square."""
+class CoarseRadixModel(nn.Module):
+    """Compose one tied coarse-radix reducer per requested square."""
 
     def __init__(self, spec: ModelSpec) -> None:
         super().__init__()
         self.config = Config(spec.vocab_size, spec.max_seq_len)
-        self.transition = ParallelRadixSquare()
+        self.transition = CoarseRadixSquare()
         self.decimal_decoder = nn.Sequential(
             nn.Linear(2 * FOURIER_HARMONICS, WIDTH),
             nn.SiLU(),
@@ -378,16 +374,18 @@ class ParallelCarryModel(nn.Module):
 
     @staticmethod
     def _initialize(module: nn.Module) -> None:
-        if isinstance(module, nn.Linear):
-            nn.init.normal_(module.weight, mean=0.0, std=0.02)
-            if module.bias is not None:
-                nn.init.normal_(module.bias, mean=0.0, std=0.002)
+        if isinstance(module, (nn.Linear, nn.GRU)):
+            for name, parameter in module.named_parameters(recurse=False):
+                if "weight" in name:
+                    nn.init.normal_(parameter, mean=0.0, std=0.02)
+                elif "bias" in name:
+                    nn.init.normal_(parameter, mean=0.0, std=0.002)
 
     def forward(
         self,
         input_ids: Tensor,
         attention_mask: Tensor | None = None,
-    ) -> tuple[Tensor, tuple[Tensor, Tensor, Tensor, Tensor, Tensor]]:
+    ) -> tuple[Tensor, tuple[Tensor, Tensor, Tensor, Tensor]]:
         if attention_mask is None:
             attention_mask = input_ids != PAD_TOKEN_ID
         else:
@@ -400,7 +398,6 @@ class ParallelCarryModel(nn.Module):
         parameter_dtype = self.special_logits.dtype
         modulus_digits = self._radix_digits(modulus).to(parameter_dtype)
         state = self._radix_digits(residue).to(parameter_dtype)
-        soft_state = state if self.training else None
         state_logits = state.new_zeros(
             state.shape[0],
             STATE_DIGITS,
@@ -416,7 +413,7 @@ class ParallelCarryModel(nn.Module):
                 as_tuple=False,
             ).squeeze(-1)
             if active_indices.numel() == 0:
-                continue
+                break
             (
                 proposal,
                 proposal_logits,
@@ -426,7 +423,7 @@ class ParallelCarryModel(nn.Module):
                 state[active_indices],
                 modulus_digits[active_indices],
                 self.gate_temperature,
-                "straight_through" if self.training else "hard",
+                not self.training,
             )
             state = state.index_copy(0, active_indices, proposal)
             state_logits = state_logits.index_copy(
@@ -434,35 +431,8 @@ class ParallelCarryModel(nn.Module):
                 active_indices,
                 proposal_logits,
             )
-            if soft_state is None:
-                invariant_losses.append(invariant_loss)
-                entropies.append(entropy)
-                continue
-            (
-                soft_proposal,
-                _,
-                soft_invariant_loss,
-                soft_entropy,
-            ) = self.transition(
-                soft_state[active_indices],
-                modulus_digits[active_indices],
-                self.gate_temperature,
-                "soft",
-            )
-            soft_state = soft_state.index_copy(
-                0,
-                active_indices,
-                soft_proposal,
-            )
-            invariant_losses.append(0.5 * (invariant_loss + soft_invariant_loss))
-            entropies.append(0.5 * (entropy + soft_entropy))
-
-        if soft_state is None:
-            trajectory_agreement = state.new_zeros(())
-        else:
-            trajectory_agreement = (state - soft_state).float().square().mean() / (
-                RADIX - 1
-            ) ** 2
+            invariant_losses.append(invariant_loss)
+            entropies.append(entropy)
 
         decoder_state = state.detach() if self.training else state
         decimal_logits = self._decode_decimal(decoder_state)
@@ -489,7 +459,6 @@ class ParallelCarryModel(nn.Module):
                 torch.stack(invariant_losses).mean(),
                 torch.stack(entropies).mean(),
                 modulus_digits,
-                trajectory_agreement,
             ),
         )
 
@@ -641,13 +610,13 @@ class DeviceAdamW(torch.optim.Optimizer):
 
 
 class WallClockSchedule:
-    """Coordinate the learning rate and soft-gate temperature."""
+    """Coordinate the learning rate and categorical temperature."""
 
     def __init__(
         self,
         optimizer: torch.optim.Optimizer,
         training_time_seconds: float,
-        model: ParallelCarryModel,
+        model: CoarseRadixModel,
     ) -> None:
         self.optimizer = optimizer
         self.model = model
@@ -680,8 +649,8 @@ class WallClockSchedule:
         self._set_multiplier(multiplier)
 
 
-def build_model(spec: ModelSpec) -> ParallelCarryModel:
-    model = ParallelCarryModel(spec)
+def build_model(spec: ModelSpec) -> CoarseRadixModel:
+    model = CoarseRadixModel(spec)
     assert_model_state(model, spec)
     return model
 
@@ -706,7 +675,7 @@ def build_optimizer(
         betas=(0.9, 0.98),
         eps=1e-8,
     )
-    if not isinstance(model, ParallelCarryModel):
+    if not isinstance(model, CoarseRadixModel):
         raise TypeError("unexpected model type")
     scheduler = WallClockSchedule(optimizer, spec.training_time_seconds, model)
     return OptimizerBundle(optimizer, scheduler)
@@ -757,17 +726,11 @@ def token_training_loss(batch: TokenLossBatch) -> Tensor:
     )
     target_radix_digits = (target_values[:, None] // radix_powers) % RADIX
 
-    if not isinstance(batch.auxiliary, tuple) or len(batch.auxiliary) != 5:
+    if not isinstance(batch.auxiliary, tuple) or len(batch.auxiliary) != 4:
         raise TypeError(
-            "auxiliary output must contain radix and trajectory terms",
+            "auxiliary output must contain radix logits and modulus digits",
         )
-    (
-        radix_logits,
-        invariant_loss,
-        entropy,
-        modulus_digits,
-        trajectory_agreement,
-    ) = batch.auxiliary
+    radix_logits, invariant_loss, entropy, modulus_digits = batch.auxiliary
     if not isinstance(radix_logits, Tensor):
         raise TypeError("radix logits must be a tensor")
     if not isinstance(invariant_loss, Tensor) or invariant_loss.ndim != 0:
@@ -776,8 +739,6 @@ def token_training_loss(batch: TokenLossBatch) -> Tensor:
         raise TypeError("entropy must be a scalar tensor")
     if not isinstance(modulus_digits, Tensor):
         raise TypeError("modulus digits must be a tensor")
-    if not isinstance(trajectory_agreement, Tensor) or trajectory_agreement.ndim != 0:
-        raise TypeError("trajectory agreement must be a scalar tensor")
     radix_losses = F.cross_entropy(
         radix_logits.transpose(1, 2).float(),
         target_radix_digits,
@@ -800,7 +761,6 @@ def token_training_loss(batch: TokenLossBatch) -> Tensor:
         + SEMANTIC_RADIX_WEIGHT * semantic_radix_loss
         + INVARIANT_WEIGHT * invariant_loss.float()
         + ENTROPY_WEIGHT * entropy.float()
-        + AGREEMENT_WEIGHT * trajectory_agreement.float()
     )
 
 
