@@ -837,3 +837,42 @@ The redundant losses therefore consumed objective scale but were neither the pri
 The remaining hard endpoint and interval objectives still cannot coordinate the scalar quotient choices through recurrent positional normalization.
 The counterintuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
 The next intuitive experiment should replace per-digit final radix cross-entropy with a dimensionless robust regression from the exact final state value to the official final answer, aligning endpoint gradients with quotient-induced numeric error while retaining the label-free local interval constraint.
+
+## L24: Robust scalar endpoint regression
+
+Date: 2026-08-02.
+
+Idea class: intuitive.
+
+Status: rejected before hosted submission because one required suite failed.
+
+The hypothesis was that L23's per-position hexadecimal cross-entropy supplied a high-magnitude endpoint gradient geometrically misaligned with quotient error, because nearby numeric residues can differ in several categorical digits while a one-step quotient error has a coherent signed effect on the represented value.
+L24 retained L23's exact base-16 normalization, scalar quotient MLP and hard straight-through decisions, six tied Horner steps, local interval loss, detached Fourier decoder, optimizer, schedule, and deployed recurrence.
+It replaced final radix cross-entropy with `log1p(abs((predicted_value - target_value) / N))^2`, using only the official final answer and the exact final recurrent state.
+The robust dimensionless error had the same weight of 0.75, a unique zero at the correct residue, and a decaying gradient for extreme invalid states.
+Removing the now-unused constant hexadecimal-choice buffer reduced persistent state from 22,353 to 22,337 elements but changed no learned parameter.
+The experiment added no intermediate label, table, branch, enumeration, solver operation, clamping, or specialized T computation.
+
+The frozen candidate was screened with the same official datasets, splits, Apple M2 Pro device, 30-second Easy budgets, and 60-second Medium budgets as L23.
+
+| Dataset | Updates | Test | OOD | Mean exact accuracy | Max T | OOD N Max T |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| E1 | 375 | 3.33% | 9.00% | 6.17% | <1 | <1 |
+| E2 | 319 | 0.83% | 0.67% | 0.75% | <1 | <1 |
+| E3 | 734 | 1.13% | 2.37% | 1.75% | <1 | <1 |
+| E4 | 751 | 0.37% | 1.33% | 0.85% | <1 | <1 |
+| E5 | 379 | 1.33% | 1.50% | 1.42% | <1 | <1 |
+| M1 | 12 | failed: non-finite loss | failed | failed | failed | failed |
+| M2 | 214 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| M3 | 950 | 0.50% | 0.47% | 0.48% | <1 | <1 |
+| M4 | 281 | 0.01% | 0.01% | 0.01% | <1 | <1 |
+| M5 | 273 | 0.08% | 0.13% | 0.11% | <1 | <1 |
+
+Scalar regression gained two total E3 examples relative to L23 and delayed M1's non-finite failure from update 4 to update 12, but E4, E5, M2, and M3 reproduced the same exact split counts.
+E1 lost two test examples, while E2 and M5 only redistributed an unchanged total count between splits and M4 restored one chance-level OOD example.
+No successful familiar- or unseen-modulus profile certified T=1.
+The intended robust objective was not generally easier: final total loss increased from 102.59 to 121.27 on E3, from 90.53 to 107.13 on E4, and across every Easy family, although it decreased on M2 and M4.
+Normalizing a globally invalid six-digit state by a much smaller modulus still leaves a large endpoint discrepancy, and a scalar error discards the positional information available in radix supervision.
+The resulting gradient neither trained exact quotient choices nor eliminated recurrent numerical instability.
+The intuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
+The next counterintuitive experiment should remove final-answer supervision from the transition entirely and train the shared quotient rule only through its uniquely identifying local interval constraints, testing whether endpoint gradients are actively corrupting a serial self-supervised reducer while the detached decimal decoder continues to learn output formatting.

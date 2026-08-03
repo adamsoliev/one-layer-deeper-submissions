@@ -1,4 +1,4 @@
-"""Interval-trained coarse-radix recurrence for modular squaring."""
+"""Residue-regressed coarse-radix recurrence for modular squaring."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ MAX_TRAINING_STEPS = 1_000_000
 BASE_LEARNING_RATE = 3e-3
 MIN_LEARNING_RATE_RATIO = 0.05
 WARMUP_FRACTION = 0.05
-SEMANTIC_RADIX_WEIGHT = 0.75
+ENDPOINT_WEIGHT = 0.75
 INVARIANT_WEIGHT = 0.5
 ENTROPY_WEIGHT = 0.002
 WEAK_DIGIT_TEMPERATURE = 0.25
@@ -68,10 +68,6 @@ class CoarseRadixSquare(nn.Module):
         )
         self.quotient_head = nn.Linear(WIDTH, 1)
         self.register_buffer(
-            "digit_choices",
-            torch.arange(RADIX, dtype=torch.float32),
-        )
-        self.register_buffer(
             "state_powers_float",
             RADIX ** torch.arange(STATE_DIGITS, dtype=torch.float32),
         )
@@ -89,13 +85,8 @@ class CoarseRadixSquare(nn.Module):
         multiplicand: Tensor,
         modulus_digits: Tensor,
         hard: bool,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor]:
         accumulator = torch.zeros_like(multiplicand)
-        final_digit_logits = multiplicand.new_zeros(
-            multiplicand.shape[0],
-            STATE_DIGITS,
-            RADIX,
-        )
         modulus_value = torch.einsum(
             "bd,d->b",
             modulus_digits.float(),
@@ -181,19 +172,10 @@ class CoarseRadixSquare(nn.Module):
                 raw_coefficients,
                 hard=hard,
             )
-            digit_choices = self.digit_choices.to(next_digits.dtype)
-            digit_logits = -(
-                next_digits[:, :, None] - digit_choices[None, None, :]
-            ).square()
             accumulator = accumulator.index_copy(
                 0,
                 active_indices,
                 next_digits[:, :STATE_DIGITS],
-            )
-            final_digit_logits = final_digit_logits.index_copy(
-                0,
-                active_indices,
-                digit_logits[:, :STATE_DIGITS],
             )
 
             reduced_value = candidate_value - quotient.float() * active_modulus_value
@@ -208,7 +190,6 @@ class CoarseRadixSquare(nn.Module):
 
         return (
             accumulator,
-            final_digit_logits,
             torch.stack(invariant_losses).mean(),
             accumulator.new_zeros(()),
         )
@@ -295,11 +276,6 @@ class CoarseRadixModel(nn.Module):
         parameter_dtype = self.special_logits.dtype
         modulus_digits = self._radix_digits(modulus).to(parameter_dtype)
         state = self._radix_digits(residue).to(parameter_dtype)
-        state_logits = state.new_zeros(
-            state.shape[0],
-            STATE_DIGITS,
-            RADIX,
-        )
         invariant_losses: list[Tensor] = []
         entropies: list[Tensor] = []
         maximum_steps = MAX_TRAIN_TIME_STEPS if self.training else MAX_EVAL_TIME_STEPS
@@ -313,7 +289,6 @@ class CoarseRadixModel(nn.Module):
                 break
             (
                 proposal,
-                proposal_logits,
                 invariant_loss,
                 entropy,
             ) = self.transition(
@@ -322,11 +297,6 @@ class CoarseRadixModel(nn.Module):
                 not self.training,
             )
             state = state.index_copy(0, active_indices, proposal)
-            state_logits = state_logits.index_copy(
-                0,
-                active_indices,
-                proposal_logits,
-            )
             invariant_losses.append(invariant_loss)
             entropies.append(entropy)
 
@@ -351,7 +321,7 @@ class CoarseRadixModel(nn.Module):
         return (
             logits,
             (
-                state_logits,
+                state,
                 torch.stack(invariant_losses).mean(),
                 torch.stack(entropies).mean(),
                 modulus_digits,
@@ -610,46 +580,43 @@ def token_training_loss(batch: TokenLossBatch) -> Tensor:
             target_values * 10 + digit,
             target_values,
         )
-    radix_powers = RADIX ** torch.arange(
-        STATE_DIGITS,
-        device=batch.labels.device,
-        dtype=torch.long,
-    )
-    target_radix_digits = (target_values[:, None] // radix_powers) % RADIX
-
     if not isinstance(batch.auxiliary, tuple) or len(batch.auxiliary) != 4:
         raise TypeError(
-            "auxiliary output must contain radix logits and modulus digits",
+            "auxiliary output must contain endpoint state and modulus digits",
         )
-    radix_logits, invariant_loss, entropy, modulus_digits = batch.auxiliary
-    if not isinstance(radix_logits, Tensor):
-        raise TypeError("radix logits must be a tensor")
+    endpoint_state, invariant_loss, entropy, modulus_digits = batch.auxiliary
+    if not isinstance(endpoint_state, Tensor) or endpoint_state.ndim != 2:
+        raise TypeError("endpoint state must be a rank-two tensor")
     if not isinstance(invariant_loss, Tensor) or invariant_loss.ndim != 0:
         raise TypeError("invariant loss must be a scalar tensor")
     if not isinstance(entropy, Tensor) or entropy.ndim != 0:
         raise TypeError("entropy must be a scalar tensor")
     if not isinstance(modulus_digits, Tensor):
         raise TypeError("modulus digits must be a tensor")
-    radix_losses = F.cross_entropy(
-        radix_logits.transpose(1, 2).float(),
-        target_radix_digits,
-        reduction="none",
+    radix_powers = RADIX ** torch.arange(
+        STATE_DIGITS,
+        device=batch.labels.device,
+        dtype=torch.float32,
     )
-    nonzero_modulus = modulus_digits != 0
-    significant_mask = torch.flip(
-        torch.cumsum(
-            torch.flip(nonzero_modulus.long(), dims=(1,)),
-            dim=1,
-        ),
-        dims=(1,),
-    ).bool()
-    semantic_radix_loss = (
-        (radix_losses * significant_mask).sum(dim=1)
-        / significant_mask.sum(dim=1).clamp_min(1)
-    ).mean()
+    predicted_values = torch.einsum(
+        "bd,d->b",
+        endpoint_state.float(),
+        radix_powers,
+    )
+    modulus_values = torch.einsum(
+        "bd,d->b",
+        modulus_digits.float(),
+        radix_powers,
+    )
+    normalized_endpoint_error = (
+        predicted_values - target_values.float()
+    ) / modulus_values
+    endpoint_loss = (
+        torch.log1p(normalized_endpoint_error.abs()).square()[valid_rows].mean()
+    )
     return (
         sequence_loss
-        + SEMANTIC_RADIX_WEIGHT * semantic_radix_loss
+        + ENDPOINT_WEIGHT * endpoint_loss
         + INVARIANT_WEIGHT * invariant_loss.float()
         + ENTROPY_WEIGHT * entropy.float()
     )
