@@ -653,3 +653,39 @@ That lower training objective did not survive the hard argmax-and-round evaluato
 The soft expectations learned a different effective computation from the discrete circuit, so smooth credit alone widens rather than closes the train/evaluation gap.
 The intuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
 The next counterintuitive experiment should train paired soft and hard trajectories with shared parameters and an unlabeled agreement objective on their final radix states, using the soft path for smooth credit while explicitly preventing it from drifting away from the deployed hard circuit.
+
+## L19: Agreement-coupled dual trajectory
+
+Date: 2026-08-02.
+
+Idea class: counterintuitive.
+
+Status: rejected before hosted submission.
+
+The hypothesis was that L18's soft path supplied useful recurrent credit but optimized a different computation from the hard evaluator, so an explicitly coupled hard trajectory could prevent that relaxation drift without discarding the smooth signal.
+L19 retained L18's transition, worst-coefficient loss, final radix supervision, detached Fourier decoder, optimizer, schedule, and 135,274 persistent state elements.
+During training it ran two recurrent trajectories through the same parameters: a hard straight-through quotient/carry/residue path matching evaluation physically, and a soft expectation path matching L18.
+Both paths contributed algebraic losses, only the hard endpoint received the official final radix label, and a weight-1 normalized mean-square loss made their final radix states agree.
+Evaluation still executed only one hard trajectory, and the candidate added no learned state, labels, tables, branches, enumeration, or specialized T operation.
+
+The frozen candidate was screened with the same official datasets, splits, Apple M2 Pro device, 30-second Easy budgets, and 60-second Medium budgets as L18.
+
+| Dataset | Updates | Test | OOD | Mean exact accuracy | Max T | OOD N Max T |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| E1 | 167 | 6.00% | 10.00% | 8.00% | <1 | <1 |
+| E2 | 145 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| E3 | 366 | 0.88% | 2.13% | 1.50% | <1 | <1 |
+| E4 | 366 | 0.69% | 1.42% | 1.05% | <1 | <1 |
+| E5 | 168 | 0.75% | 0.33% | 0.54% | <1 | <1 |
+| M1 | 113 | 0.00% | 0.07% | 0.03% | <1 | <1 |
+| M2 | 117 | 0.39% | 0.58% | 0.48% | <1 | <1 |
+| M3 | 730 | 0.42% | 0.23% | 0.33% | <1 | <1 |
+| M4 | 212 | 0.04% | 0.06% | 0.05% | <1 | <1 |
+| M5 | 186 | 0.39% | 0.30% | 0.34% | <1 | <1 |
+
+Agreement raised E3 and M3 relative to L18 and produced the best valid local E4 result so far at 1.05%, but the gain was isolated: E3 remained below the 1.94% local high, E2 fell to zero, E5 fell to 0.54%, M2 declined, and long-depth M4 collapsed to 0.05%.
+Every familiar- and unseen-modulus profile failed at T=1.
+The added pressure kept total final losses at 3.42--3.61 rather than L18's easier 3.11--3.36, while dual training reduced E3 updates from 606 to 366, M3 from 1,161 to 730, and M4 from 380 to 212.
+Final-state agreement partially repaired the relaxation gap but neither identified the correct hard circuit nor justified its fixed-budget compute cost, especially as recurrent depth grew.
+The counterintuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
+The next intuitive experiment should replace the one-shot parallel quotient predictor with a tied coarse-radix serial reducer: factor each large quotient digit into small categorical components, preserve value locally at every Horner step, and spend latent depth directly on the ordered division dependency rather than on two approximate global trajectories.

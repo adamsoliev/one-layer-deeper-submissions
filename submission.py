@@ -1,4 +1,4 @@
-"""Annealed soft recurrence for modular squaring."""
+"""Agreement-coupled dual recurrence for modular squaring."""
 
 from __future__ import annotations
 
@@ -36,6 +36,7 @@ WARMUP_FRACTION = 0.05
 SEMANTIC_RADIX_WEIGHT = 0.75
 INVARIANT_WEIGHT = 0.5
 ENTROPY_WEIGHT = 0.002
+AGREEMENT_WEIGHT = 1.0
 WEAK_DIGIT_TEMPERATURE = 0.25
 CONSTRAINT_TEMPERATURE = 0.1
 PAD_TOKEN_ID = 0
@@ -71,24 +72,37 @@ def relaxed_choice(
     choices: Tensor,
     temperature: float,
     *,
-    hard: bool,
+    mode: str,
 ) -> tuple[Tensor, Tensor]:
-    """Compose discrete values while differentiating through expectations."""
+    """Compose soft, hard-ST, or hard categorical values."""
     probabilities = F.softmax(
         logits.float() / max(temperature, 0.05),
         dim=-1,
     ).to(logits.dtype)
     soft_value = torch.einsum("...k,k->...", probabilities, choices)
     hard_value = choices[probabilities.argmax(dim=-1)]
-    value = hard_value if hard else soft_value
+    if mode == "soft":
+        value = soft_value
+    elif mode == "straight_through":
+        value = hard_value + soft_value - soft_value.detach()
+    elif mode == "hard":
+        value = hard_value
+    else:
+        raise ValueError(f"unsupported choice mode: {mode}")
     entropy = -(probabilities * probabilities.clamp_min(1e-8).log()).sum(dim=-1)
     return value, entropy
 
 
-def straight_through_round(value: Tensor, *, hard: bool) -> Tensor:
-    """Anneal continuous training carries toward integer evaluation carries."""
+def composed_round(value: Tensor, *, mode: str) -> Tensor:
+    """Compose soft, hard-ST, or hard carry values."""
     rounded = value.round()
-    return rounded if hard else value
+    if mode == "soft":
+        return value
+    if mode == "straight_through":
+        return rounded + value - value.detach()
+    if mode == "hard":
+        return rounded
+    raise ValueError(f"unsupported choice mode: {mode}")
 
 
 class SharedDilatedBlock(nn.Module):
@@ -160,7 +174,7 @@ class ParallelRadixSquare(nn.Module):
         residue_digits: Tensor,
         modulus_digits: Tensor,
         temperature: float,
-        hard: bool,
+        choice_mode: str,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         product_coefficients = torch.einsum(
             "bi,bj,ijk->bk",
@@ -196,7 +210,7 @@ class ParallelRadixSquare(nn.Module):
             quotient_logits,
             self.digit_choices.to(quotient_logits.dtype),
             temperature,
-            hard=hard,
+            mode=choice_mode,
         )
         quotient_product = torch.einsum(
             "bi,bj,ijk->bk",
@@ -215,9 +229,9 @@ class ParallelRadixSquare(nn.Module):
         canonical_state = self.residual_projection(residual_features)
         for dilation in REFINEMENT_DILATIONS:
             canonical_state = self.canonical_block(canonical_state, dilation)
-        carries = straight_through_round(
+        carries = composed_round(
             self.carry_head(canonical_state).squeeze(-1),
-            hard=hard,
+            mode=choice_mode,
         )
         residue_logits = self.digit_head(
             canonical_state[:, :STATE_DIGITS],
@@ -226,7 +240,7 @@ class ParallelRadixSquare(nn.Module):
             residue_logits,
             self.digit_choices.to(residue_logits.dtype),
             temperature,
-            hard=hard,
+            mode=choice_mode,
         )
 
         incoming_carries = F.pad(carries[:, :-1], (1, 0))
@@ -373,7 +387,7 @@ class ParallelCarryModel(nn.Module):
         self,
         input_ids: Tensor,
         attention_mask: Tensor | None = None,
-    ) -> tuple[Tensor, tuple[Tensor, Tensor, Tensor, Tensor]]:
+    ) -> tuple[Tensor, tuple[Tensor, Tensor, Tensor, Tensor, Tensor]]:
         if attention_mask is None:
             attention_mask = input_ids != PAD_TOKEN_ID
         else:
@@ -386,6 +400,7 @@ class ParallelCarryModel(nn.Module):
         parameter_dtype = self.special_logits.dtype
         modulus_digits = self._radix_digits(modulus).to(parameter_dtype)
         state = self._radix_digits(residue).to(parameter_dtype)
+        soft_state = state if self.training else None
         state_logits = state.new_zeros(
             state.shape[0],
             STATE_DIGITS,
@@ -411,7 +426,7 @@ class ParallelCarryModel(nn.Module):
                 state[active_indices],
                 modulus_digits[active_indices],
                 self.gate_temperature,
-                not self.training,
+                "straight_through" if self.training else "hard",
             )
             state = state.index_copy(0, active_indices, proposal)
             state_logits = state_logits.index_copy(
@@ -419,8 +434,35 @@ class ParallelCarryModel(nn.Module):
                 active_indices,
                 proposal_logits,
             )
-            invariant_losses.append(invariant_loss)
-            entropies.append(entropy)
+            if soft_state is None:
+                invariant_losses.append(invariant_loss)
+                entropies.append(entropy)
+                continue
+            (
+                soft_proposal,
+                _,
+                soft_invariant_loss,
+                soft_entropy,
+            ) = self.transition(
+                soft_state[active_indices],
+                modulus_digits[active_indices],
+                self.gate_temperature,
+                "soft",
+            )
+            soft_state = soft_state.index_copy(
+                0,
+                active_indices,
+                soft_proposal,
+            )
+            invariant_losses.append(0.5 * (invariant_loss + soft_invariant_loss))
+            entropies.append(0.5 * (entropy + soft_entropy))
+
+        if soft_state is None:
+            trajectory_agreement = state.new_zeros(())
+        else:
+            trajectory_agreement = (state - soft_state).float().square().mean() / (
+                RADIX - 1
+            ) ** 2
 
         decoder_state = state.detach() if self.training else state
         decimal_logits = self._decode_decimal(decoder_state)
@@ -447,6 +489,7 @@ class ParallelCarryModel(nn.Module):
                 torch.stack(invariant_losses).mean(),
                 torch.stack(entropies).mean(),
                 modulus_digits,
+                trajectory_agreement,
             ),
         )
 
@@ -714,11 +757,17 @@ def token_training_loss(batch: TokenLossBatch) -> Tensor:
     )
     target_radix_digits = (target_values[:, None] // radix_powers) % RADIX
 
-    if not isinstance(batch.auxiliary, tuple) or len(batch.auxiliary) != 4:
+    if not isinstance(batch.auxiliary, tuple) or len(batch.auxiliary) != 5:
         raise TypeError(
-            "auxiliary output must contain radix logits and modulus digits",
+            "auxiliary output must contain radix and trajectory terms",
         )
-    radix_logits, invariant_loss, entropy, modulus_digits = batch.auxiliary
+    (
+        radix_logits,
+        invariant_loss,
+        entropy,
+        modulus_digits,
+        trajectory_agreement,
+    ) = batch.auxiliary
     if not isinstance(radix_logits, Tensor):
         raise TypeError("radix logits must be a tensor")
     if not isinstance(invariant_loss, Tensor) or invariant_loss.ndim != 0:
@@ -727,6 +776,8 @@ def token_training_loss(batch: TokenLossBatch) -> Tensor:
         raise TypeError("entropy must be a scalar tensor")
     if not isinstance(modulus_digits, Tensor):
         raise TypeError("modulus digits must be a tensor")
+    if not isinstance(trajectory_agreement, Tensor) or trajectory_agreement.ndim != 0:
+        raise TypeError("trajectory agreement must be a scalar tensor")
     radix_losses = F.cross_entropy(
         radix_logits.transpose(1, 2).float(),
         target_radix_digits,
@@ -749,6 +800,7 @@ def token_training_loss(batch: TokenLossBatch) -> Tensor:
         + SEMANTIC_RADIX_WEIGHT * semantic_radix_loss
         + INVARIANT_WEIGHT * invariant_loss.float()
         + ENTROPY_WEIGHT * entropy.float()
+        + AGREEMENT_WEIGHT * trajectory_agreement.float()
     )
 
 
