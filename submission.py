@@ -1,4 +1,4 @@
-"""Locally trained discrete recurrence for modular squaring."""
+"""Annealed soft recurrence for modular squaring."""
 
 from __future__ import annotations
 
@@ -80,15 +80,15 @@ def relaxed_choice(
     ).to(logits.dtype)
     soft_value = torch.einsum("...k,k->...", probabilities, choices)
     hard_value = choices[probabilities.argmax(dim=-1)]
-    value = hard_value if hard else hard_value + soft_value - soft_value.detach()
+    value = hard_value if hard else soft_value
     entropy = -(probabilities * probabilities.clamp_min(1e-8).log()).sum(dim=-1)
     return value, entropy
 
 
 def straight_through_round(value: Tensor, *, hard: bool) -> Tensor:
-    """Compose integer carries while retaining an identity gradient."""
+    """Anneal continuous training carries toward integer evaluation carries."""
     rounded = value.round()
-    return rounded if hard else rounded + value - value.detach()
+    return rounded if hard else value
 
 
 class SharedDilatedBlock(nn.Module):
@@ -413,8 +413,7 @@ class ParallelCarryModel(nn.Module):
                 self.gate_temperature,
                 not self.training,
             )
-            recurrent_proposal = proposal.detach() if self.training else proposal
-            state = state.index_copy(0, active_indices, recurrent_proposal)
+            state = state.index_copy(0, active_indices, proposal)
             state_logits = state_logits.index_copy(
                 0,
                 active_indices,

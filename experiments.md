@@ -616,3 +616,40 @@ The direct local losses therefore did not become easier to solve when recurrent 
 Full cross-step gradients were carrying useful sampled-family information even though they were insufficient for arithmetic; detaching them instead favored small fixed-family biases and degraded the reusable transition.
 The counterintuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
 The next intuitive experiment should restore full backpropagation through time but use the annealed categorical expectations and continuous carries as the physical training trajectory, allowing smooth endpoint credit through every square before converging toward the hard evaluation circuit.
+
+## L18: Annealed soft supervised trajectory
+
+Date: 2026-08-02.
+
+Idea class: intuitive.
+
+Status: rejected before hosted submission.
+
+The hypothesis was that L16's full recurrent gradient contained useful sampled-family credit but its hard straight-through physical states made the supervised endpoint landscape discontinuous, preventing that credit from fitting the tied transition.
+L18 restored full backpropagation through time and retained L16's architecture, worst-coefficient loss, final radix supervision, detached Fourier decoder, optimizer, temperature schedule, and 135,274 persistent state elements.
+During training, quotient and residue states were the actual temperature-scaled categorical expectations and carries remained continuous; the temperature still annealed from 2.0 to 0.05 over the wall-clock budget.
+Evaluation continued to use categorical argmax digits and rounded integer carries, so the deployed architecture and all state limits were unchanged.
+The change added no labels, memories, tables, branches, enumerations, or specialized operators.
+
+The frozen candidate was screened with the same official datasets, splits, Apple M2 Pro device, 30-second Easy budgets, and 60-second Medium budgets as L16 and L17.
+
+| Dataset | Updates | Test | OOD | Mean exact accuracy | Max T | OOD N Max T |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| E1 | 238 | 6.00% | 10.00% | 8.00% | <1 | <1 |
+| E2 | 219 | 0.83% | 0.67% | 0.75% | <1 | <1 |
+| E3 | 606 | 0.50% | 1.00% | 0.75% | <1 | <1 |
+| E4 | 605 | 0.31% | 1.17% | 0.74% | <1 | <1 |
+| E5 | 239 | 0.42% | 1.33% | 0.88% | <1 | <1 |
+| M1 | 204 | 0.03% | 0.07% | 0.05% | <1 | <1 |
+| M2 | 169 | 0.49% | 0.66% | 0.57% | <1 | <1 |
+| M3 | 1,161 | 0.25% | 0.03% | 0.14% | <1 | <1 |
+| M4 | 380 | 0.14% | 0.11% | 0.13% | <1 | <1 |
+| M5 | 324 | 0.30% | 0.20% | 0.25% | <1 | <1 |
+
+Soft training recovered L16's E1, E2, and M2 split counts and slightly raised E4 relative to L16, but E3 fell from 29 to 12 held-out correct examples, E5 fell from 1.42% to 0.88%, and every sampled Medium family regressed.
+No familiar- or unseen-modulus profile certified T=1.
+The relaxed optimization objective did become substantially easier: total final losses fell to 3.11--3.36 from L16's 3.48--3.94 at comparable throughput, while decimal-only evaluation losses remained about 2.12--2.30.
+That lower training objective did not survive the hard argmax-and-round evaluator even though the temperature reached 0.05 by the deadline.
+The soft expectations learned a different effective computation from the discrete circuit, so smooth credit alone widens rather than closes the train/evaluation gap.
+The intuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
+The next counterintuitive experiment should train paired soft and hard trajectories with shared parameters and an unlabeled agreement objective on their final radix states, using the soft path for smooth credit while explicitly preventing it from drifting away from the deployed hard circuit.
