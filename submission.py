@@ -1,4 +1,4 @@
-"""Unbounded-quotient coarse-radix recurrence for modular squaring."""
+"""Integer-phase coarse-radix recurrence for modular squaring."""
 
 from __future__ import annotations
 
@@ -40,8 +40,7 @@ X_TOKEN_ID = 3
 T_TOKEN_ID = 4
 DIGIT_OFFSET = 7
 NUM_DECIMAL_DIGITS = 10
-ON_MANIFOLD_QUOTIENT_MAX = 2 * RADIX - 2
-QUOTIENT_SOFTPLUS_SCALE = ON_MANIFOLD_QUOTIENT_MAX / (2.0 * math.log(2.0))
+QUOTIENT_MAX = 2 * RADIX - 2
 
 
 class Config:
@@ -147,20 +146,20 @@ class CoarseRadixSquare(nn.Module):
             )
             quotient_features = torch.stack(
                 (
-                    candidate_ratio / (ON_MANIFOLD_QUOTIENT_MAX + 1.0),
+                    candidate_ratio / (QUOTIENT_MAX + 1.0),
                     torch.tanh(candidate_ratio / RADIX),
                     accumulator_value / denominator,
                     multiplicand_value[active_indices] / denominator,
                     multiplier_digit.float() / (RADIX - 1),
                     torch.log1p(denominator) / math.log(16_777_217.0),
                     rank_feature,
-                    torch.sin(math.pi * candidate_ratio / RADIX),
-                    torch.cos(math.pi * candidate_ratio / RADIX),
+                    torch.sin(2.0 * math.pi * candidate_ratio),
+                    torch.cos(2.0 * math.pi * candidate_ratio),
                 ),
                 dim=-1,
             ).to(multiplicand.dtype)
             quotient_hidden = self.quotient_trunk(quotient_features)
-            soft_quotient = QUOTIENT_SOFTPLUS_SCALE * F.softplus(
+            soft_quotient = QUOTIENT_MAX * torch.sigmoid(
                 self.quotient_head(quotient_hidden).squeeze(-1),
             )
             quotient = relaxed_or_rounded(soft_quotient, hard=hard)

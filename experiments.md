@@ -994,3 +994,40 @@ Off-manifold quotient saturation was therefore not the primary obstacle.
 Removing it gives the optimizer uncontrolled quotient and recurrent-state magnitudes, widens the relaxed-state/readout mismatch, and sacrifices the stability established by bounded endpoint-free training.
 The counterintuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
 The next intuitive experiment should return to L26's stable bounded quotient but replace its low-frequency ratio features with unit-period Fourier phase features, exposing the repeated integer boundaries required by floor-like quotient selection while leaving magnitude prediction learned and range-independent.
+
+## L28: Unit-period quotient phase features
+
+Date: 2026-08-02.
+
+Idea class: intuitive.
+
+Status: rejected before hosted submission because two required suites failed.
+
+The hypothesis was that L26's quotient MLP received ratio magnitude but its trigonometric features completed only one cycle across the entire on-manifold quotient range, forcing a shallow smooth network to synthesize every repeated integer boundary needed by floor-like selection.
+L28 returned exactly to L26's stable bounded relaxed quotient, endpoint-free interval and lattice losses, exact positional normalization, six tied Horner steps, detached Fourier decoder, optimizer, schedule, and hard evaluation recurrence.
+It changed only the two quotient features from a period-32 sine/cosine pair to `sin(2 * pi * candidate_ratio)` and `cos(2 * pi * candidate_ratio)`.
+The unit-period phase exposes fractional quotient position with two fixed features and no range-sized parameters, table, enumeration, labels, branch, solver operation, or specialized T computation.
+
+The frozen candidate was screened with the same official datasets, splits, Apple M2 Pro device, 30-second Easy budgets, and 60-second Medium budgets as L26 and L27.
+
+| Dataset | Updates | Test | OOD | Mean exact accuracy | Max T | OOD N Max T |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| E1 | 436 | 4.67% | 9.00% | 6.83% | <1 | <1 |
+| E2 | 295 | 1.04% | 1.00% | 1.02% | <1 | <1 |
+| E3 | 746 | 1.13% | 2.25% | 1.69% | <1 | <1 |
+| E4 | 775 | 0.37% | 1.33% | 0.85% | <1 | <1 |
+| E5 | 406 | 1.33% | 1.50% | 1.42% | <1 | <1 |
+| M1 | 2 | failed: non-finite loss | failed | failed | failed | failed |
+| M2 | 2 | failed: non-finite loss | failed | failed | failed | failed |
+| M3 | 1,187 | 0.50% | 0.47% | 0.48% | <1 | <1 |
+| M4 | 301 | 0.01% | 0.04% | 0.03% | <1 | <1 |
+| M5 | 282 | 0.10% | 0.03% | 0.07% | <1 | <1 |
+
+The finer phase did not improve quotient learning: E3 lost two total examples and E4 exactly reproduced L26, while every successful familiar- and unseen-modulus profile failed at T=1.
+E1 and E2 each gained one example and M4 gained four chance-scale examples, but M3 was unchanged and M5 remained marginal.
+More importantly, M1 and M2 both became non-finite at update 2 even though the bounded L26 source completed every suite.
+Final E3 loss was effectively unchanged at 64.18 versus L26's 64.01, E4 worsened from 55.81 to 56.71, and M3 worsened from 47.58 to 48.92.
+The unit-period features carry a derivative 32 times larger than L26's low-frequency phase with respect to candidate ratio.
+Backpropagating that high-frequency sensitivity through off-manifold recurrent states destabilizes some Medium regimes without making the integer decision surface easier under the fixed budget.
+The intuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
+The next counterintuitive experiment should preserve unit-period phase values but detach their candidate-ratio inputs, allowing the quotient head to learn fractional phase locally while preventing high-frequency phase derivatives from propagating backward through earlier recurrent states.
