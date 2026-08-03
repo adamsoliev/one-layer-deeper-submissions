@@ -1031,3 +1031,43 @@ The unit-period features carry a derivative 32 times larger than L26's low-frequ
 Backpropagating that high-frequency sensitivity through off-manifold recurrent states destabilizes some Medium regimes without making the integer decision surface easier under the fixed budget.
 The intuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
 The next counterintuitive experiment should preserve unit-period phase values but detach their candidate-ratio inputs, allowing the quotient head to learn fractional phase locally while preventing high-frequency phase derivatives from propagating backward through earlier recurrent states.
+
+## L29: Detached unit-phase inputs
+
+Date: 2026-08-02.
+
+Idea class: counterintuitive.
+
+Status: rejected before hosted submission.
+
+The hypothesis was that L28's unit-period phase values could still expose useful local integer-boundary information, while only their high-frequency derivatives through recurrent candidate ratios caused the M1 and M2 failures.
+L29 retained L28's 22,337-element bounded relaxed quotient, unit-period sine/cosine values, endpoint-free interval and lattice losses, exact positional normalization, six tied Horner steps, detached Fourier decoder, optimizer, schedule, and hard evaluation recurrence.
+It detached `candidate_ratio` only before computing the two phase features.
+The quotient head's phase-feature weights remained trainable and all forward values were bit-identical to L28, but phase derivatives no longer propagated into earlier recurrent states.
+A direct gradient-routing check verified identical phase values, nonzero phase-weight gradients, and the absence of phase gradients on the ratio input.
+The change added no state, label, table, branch, enumeration, solver operation, or specialized T computation.
+
+The frozen candidate was screened with the same official datasets, splits, Apple M2 Pro device, 30-second Easy budgets, and 60-second Medium budgets as L28.
+
+| Dataset | Updates | Test | OOD | Mean exact accuracy | Max T | OOD N Max T |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| E1 | 355 | 4.00% | 9.00% | 6.50% | <1 | <1 |
+| E2 | 296 | 1.04% | 0.67% | 0.85% | <1 | <1 |
+| E3 | 746 | 1.13% | 2.25% | 1.69% | <1 | <1 |
+| E4 | 732 | 0.37% | 1.33% | 0.85% | <1 | <1 |
+| E5 | 378 | 1.33% | 1.50% | 1.42% | <1 | <1 |
+| M1 | 210 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| M2 | 207 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| M3 | 1,078 | 0.50% | 0.47% | 0.48% | <1 | <1 |
+| M4 | 288 | 0.01% | 0.00% | 0.01% | <1 | <1 |
+| M5 | 317 | 0.08% | 0.07% | 0.07% | <1 | <1 |
+
+Detaching the phase inputs restored complete numerical coverage: M1 and M2 trained and evaluated normally instead of becoming non-finite at update 2 under L28.
+That confirms the recurrent unit-phase derivative, not the phase values or bounded quotient themselves, caused L28's failures.
+The stable candidate did not improve arithmetic.
+E3 and E4 reproduced L28's exact split counts, M3 was also unchanged, and every familiar- and unseen-modulus profile failed at T=1.
+Marginal changes on E1, E2, M4, and M5 moved back toward L26 rather than forming a broad gain.
+Final E3 loss was identical to L28 at 64.18, E4 changed only from 56.71 to 56.51, and M3 improved from 48.92 to 46.23 without changing one hard prediction.
+Unit-period phase values therefore add no useful quotient-selection capacity under this local objective, even after their destructive recurrent gradient is removed.
+The counterintuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
+The next intuitive experiment should return to L26's stable low-frequency inputs and replace the shallow quotient MLP with a fixed-depth weight-tied GRU refinement, spending additional latent serial computation on each local quotient decision without adding range-dependent state or intermediate supervision.

@@ -1,4 +1,4 @@
-"""Integer-phase coarse-radix recurrence for modular squaring."""
+"""Detached-phase coarse-radix recurrence for modular squaring."""
 
 from __future__ import annotations
 
@@ -140,6 +140,7 @@ class CoarseRadixSquare(nn.Module):
             )
             denominator = active_modulus_value.clamp_min(1.0)
             candidate_ratio = candidate_value / denominator
+            phase_ratio = candidate_ratio.detach()
             rank_feature = torch.full_like(
                 candidate_ratio,
                 rank / max(STATE_DIGITS - 1, 1),
@@ -153,8 +154,8 @@ class CoarseRadixSquare(nn.Module):
                     multiplier_digit.float() / (RADIX - 1),
                     torch.log1p(denominator) / math.log(16_777_217.0),
                     rank_feature,
-                    torch.sin(2.0 * math.pi * candidate_ratio),
-                    torch.cos(2.0 * math.pi * candidate_ratio),
+                    torch.sin(2.0 * math.pi * phase_ratio),
+                    torch.cos(2.0 * math.pi * phase_ratio),
                 ),
                 dim=-1,
             ).to(multiplicand.dtype)
