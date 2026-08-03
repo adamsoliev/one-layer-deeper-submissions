@@ -1,4 +1,4 @@
-"""Exact-normalization coarse-radix recurrence for modular squaring."""
+"""Interval-trained coarse-radix recurrence for modular squaring."""
 
 from __future__ import annotations
 
@@ -177,7 +177,7 @@ class CoarseRadixSquare(nn.Module):
             raw_coefficients = (
                 candidate_coefficients - quotient[:, None] * extended_modulus
             )
-            next_digits, final_carry = self._normalize_coefficients(
+            next_digits, _ = self._normalize_coefficients(
                 raw_coefficients,
                 hard=hard,
             )
@@ -197,23 +197,13 @@ class CoarseRadixSquare(nn.Module):
             )
 
             reduced_value = candidate_value - quotient.float() * active_modulus_value
-            represented_value = torch.einsum(
-                "bd,d->b",
-                next_digits.float(),
-                self.extended_powers_float,
-            )
             below_zero = F.relu(-reduced_value / denominator)
             above_modulus = F.relu(
                 (reduced_value - (active_modulus_value - 1.0)) / denominator,
             )
-            representation_error = (
-                represented_value - reduced_value
-            ).abs() / denominator
             invariant_losses.append(
                 torch.log1p(below_zero).square().mean()
-                + torch.log1p(above_modulus).square().mean()
-                + torch.log1p(representation_error).square().mean()
-                + torch.log1p(final_carry.abs()).square().mean(),
+                + torch.log1p(above_modulus).square().mean(),
             )
 
         return (

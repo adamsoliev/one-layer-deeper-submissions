@@ -799,3 +799,41 @@ The quotient signal remained grossly unsolved despite the additional updates: fi
 Because the representation recurrence is exact, its final-carry and reconstruction penalties are algebraically redundant with the local requirement that the reduced value lie in `[0, N)`; their much larger dynamic range appears to dominate rather than clarify quotient learning.
 The intuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
 The next counterintuitive experiment should retain exact normalization but delete the redundant final-carry and reconstruction penalties, training each rounded quotient only through the uniquely identifying dimensionless interval constraint plus official endpoint supervision.
+
+## L23: Interval-only quotient constraint
+
+Date: 2026-08-02.
+
+Idea class: counterintuitive.
+
+Status: rejected before hosted submission because one required suite failed.
+
+The hypothesis was that L22's parameter-free normalization already guaranteed exact positional reconstruction, making its reconstruction-error and final-carry losses redundant whenever the local reduced value satisfied the uniquely identifying interval `0 <= r < N`.
+Their larger dynamic range could therefore overwhelm the quotient learner without adding information.
+L23 retained L22's 22,353-element architecture, exact hard base-16 normalization, scalar quotient MLP and straight-through rounding, six tied Horner steps, final radix supervision, detached Fourier decoder, optimizer, schedule, and all forward and evaluation behavior.
+It deleted only the two redundant penalties, leaving the dimensionless lower- and upper-interval violations as the local invariant loss.
+The change added no state, labels, tables, branches, enumeration, solver step, or specialized operator.
+
+The frozen candidate was screened with the same official datasets, splits, Apple M2 Pro device, 30-second Easy budgets, and 60-second Medium budgets as L22.
+
+| Dataset | Updates | Test | OOD | Mean exact accuracy | Max T | OOD N Max T |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| E1 | 352 | 4.67% | 9.00% | 6.83% | <1 | <1 |
+| E2 | 309 | 0.63% | 1.00% | 0.81% | <1 | <1 |
+| E3 | 751 | 1.00% | 2.13% | 1.56% | <1 | <1 |
+| E4 | 726 | 0.37% | 1.33% | 0.85% | <1 | <1 |
+| E5 | 329 | 1.33% | 1.50% | 1.42% | <1 | <1 |
+| M1 | 4 | failed: non-finite loss | failed | failed | failed | failed |
+| M2 | 204 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| M3 | 967 | 0.50% | 0.47% | 0.48% | <1 | <1 |
+| M4 | 274 | 0.01% | 0.00% | 0.01% | <1 | <1 |
+| M5 | 261 | 0.10% | 0.07% | 0.08% | <1 | <1 |
+
+The deleted terms were active: successful final total losses fell from L22's 64.34--146.69 range to 61.75--113.17, including 126.94 to 102.59 on E3 and 113.39 to 90.53 on E4.
+That cleaner objective did not alter the discrete computation meaningfully.
+E1, E4, E5, M2, M3, and M5 reproduced L22's exact split counts; E3 lost one OOD example, E2 moved by only one net example, and M4 lost its sole OOD example.
+No successful familiar- or unseen-modulus profile certified T=1, while M1 became non-finite at update 4 rather than update 5.
+The redundant losses therefore consumed objective scale but were neither the principal accuracy barrier nor the source of M1 instability.
+The remaining hard endpoint and interval objectives still cannot coordinate the scalar quotient choices through recurrent positional normalization.
+The counterintuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
+The next intuitive experiment should replace per-digit final radix cross-entropy with a dimensionless robust regression from the exact final state value to the official final answer, aligning endpoint gradients with quotient-induced numeric error while retaining the label-free local interval constraint.
