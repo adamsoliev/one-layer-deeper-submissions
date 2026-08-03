@@ -1,4 +1,4 @@
-"""Scalar-quotient coarse-radix recurrence for modular squaring."""
+"""Exact-normalization coarse-radix recurrence for modular squaring."""
 
 from __future__ import annotations
 
@@ -22,7 +22,6 @@ STATE_DIGITS = 6
 EXTENDED_DIGITS = STATE_DIGITS + 1
 OUTPUT_DIGITS = 8
 WIDTH = 96
-CARRY_WIDTH = 64
 FOURIER_HARMONICS = 8
 MAX_TRAIN_TIME_STEPS = 16
 MAX_EVAL_TIME_STEPS = 64
@@ -36,39 +35,18 @@ SEMANTIC_RADIX_WEIGHT = 0.75
 INVARIANT_WEIGHT = 0.5
 ENTROPY_WEIGHT = 0.002
 WEAK_DIGIT_TEMPERATURE = 0.25
-CONSTRAINT_TEMPERATURE = 0.1
 PAD_TOKEN_ID = 0
 X_TOKEN_ID = 3
 T_TOKEN_ID = 4
 DIGIT_OFFSET = 7
 NUM_DECIMAL_DIGITS = 10
 QUOTIENT_MAX = 2 * RADIX - 2
-MAX_RAW_COEFFICIENT = QUOTIENT_MAX * (RADIX - 1)
 
 
 class Config:
     def __init__(self, vocab_size: int, max_seq_len: int) -> None:
         self.vocab_size = vocab_size
         self.max_seq_len = max_seq_len
-
-
-def straight_through_choice(
-    logits: Tensor,
-    choices: Tensor,
-    temperature: float,
-    *,
-    hard: bool,
-) -> tuple[Tensor, Tensor]:
-    """Compose categorical values with a hard training forward pass."""
-    probabilities = F.softmax(
-        logits.float() / max(temperature, 0.05),
-        dim=-1,
-    ).to(logits.dtype)
-    soft_value = torch.einsum("...k,k->...", probabilities, choices)
-    hard_value = choices[probabilities.argmax(dim=-1)]
-    value = hard_value if hard else hard_value + soft_value - soft_value.detach()
-    entropy = -(probabilities * probabilities.clamp_min(1e-8).log()).sum(dim=-1)
-    return value, entropy
 
 
 def straight_through_round(value: Tensor, *, hard: bool) -> Tensor:
@@ -89,9 +67,6 @@ class CoarseRadixSquare(nn.Module):
             nn.SiLU(),
         )
         self.quotient_head = nn.Linear(WIDTH, 1)
-        self.carry_scan = nn.GRU(10, CARRY_WIDTH, batch_first=True)
-        self.carry_head = nn.Linear(CARRY_WIDTH, 1)
-        self.digit_head = nn.Linear(CARRY_WIDTH, RADIX)
         self.register_buffer(
             "digit_choices",
             torch.arange(RADIX, dtype=torch.float32),
@@ -108,16 +83,11 @@ class CoarseRadixSquare(nn.Module):
             "digit_indices",
             torch.arange(STATE_DIGITS, dtype=torch.long),
         )
-        self.register_buffer(
-            "extended_positions",
-            torch.linspace(0.0, 1.0, EXTENDED_DIGITS),
-        )
 
     def forward(
         self,
         multiplicand: Tensor,
         modulus_digits: Tensor,
-        temperature: float,
         hard: bool,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         accumulator = torch.zeros_like(multiplicand)
@@ -140,7 +110,6 @@ class CoarseRadixSquare(nn.Module):
             (modulus_digits > 0).long() * self.digit_indices[None, :]
         ).amax(dim=1)
         invariant_losses: list[Tensor] = []
-        entropies: list[Tensor] = []
 
         for rank in range(STATE_DIGITS):
             active_indices = torch.nonzero(
@@ -208,28 +177,14 @@ class CoarseRadixSquare(nn.Module):
             raw_coefficients = (
                 candidate_coefficients - quotient[:, None] * extended_modulus
             )
-            carry_features = self._carry_features(
+            next_digits, final_carry = self._normalize_coefficients(
                 raw_coefficients,
-                extended_accumulator,
-                extended_multiplicand,
-                extended_modulus,
-                quotient,
-                multiplier_digit,
-            )
-            carry_state, _ = self.carry_scan(carry_features)
-            soft_carries = self.carry_head(carry_state).squeeze(-1)
-            carries = straight_through_round(soft_carries, hard=hard)
-            digit_logits = self.digit_head(carry_state)
-            next_digits, digit_entropy = straight_through_choice(
-                digit_logits,
-                self.digit_choices.to(digit_logits.dtype),
-                temperature,
                 hard=hard,
             )
-            incoming_carries = F.pad(carries[:, :-1], (1, 0))
-            normalized_coefficients = (
-                raw_coefficients + incoming_carries - RADIX * carries
-            )
+            digit_choices = self.digit_choices.to(next_digits.dtype)
+            digit_logits = -(
+                next_digits[:, :, None] - digit_choices[None, None, :]
+            ).square()
             accumulator = accumulator.index_copy(
                 0,
                 active_indices,
@@ -247,21 +202,6 @@ class CoarseRadixSquare(nn.Module):
                 next_digits.float(),
                 self.extended_powers_float,
             )
-            coefficient_constraints = torch.cat(
-                (
-                    (normalized_coefficients - next_digits).abs(),
-                    carries[:, -1:].abs(),
-                ),
-                dim=1,
-            )
-            constraint_magnitudes = torch.log1p(coefficient_constraints)
-            smooth_worst_constraint = CONSTRAINT_TEMPERATURE * (
-                torch.logsumexp(
-                    constraint_magnitudes / CONSTRAINT_TEMPERATURE,
-                    dim=1,
-                )
-                - math.log(coefficient_constraints.shape[1])
-            )
             below_zero = F.relu(-reduced_value / denominator)
             above_modulus = F.relu(
                 (reduced_value - (active_modulus_value - 1.0)) / denominator,
@@ -270,50 +210,39 @@ class CoarseRadixSquare(nn.Module):
                 represented_value - reduced_value
             ).abs() / denominator
             invariant_losses.append(
-                smooth_worst_constraint.square().mean()
-                + torch.log1p(below_zero).square().mean()
+                torch.log1p(below_zero).square().mean()
                 + torch.log1p(above_modulus).square().mean()
-                + torch.log1p(representation_error).square().mean(),
+                + torch.log1p(representation_error).square().mean()
+                + torch.log1p(final_carry.abs()).square().mean(),
             )
-            entropies.append(digit_entropy.float().mean())
 
         return (
             accumulator,
             final_digit_logits,
             torch.stack(invariant_losses).mean(),
-            torch.stack(entropies).mean(),
+            accumulator.new_zeros(()),
         )
 
-    def _carry_features(
-        self,
-        raw: Tensor,
-        accumulator: Tensor,
-        multiplicand: Tensor,
-        modulus: Tensor,
-        quotient: Tensor,
-        multiplier: Tensor,
-    ) -> Tensor:
-        positions = self.extended_positions.to(raw.dtype)[None, :].expand(
-            raw.shape[0],
-            -1,
-        )
-        normalized_quotient = quotient[:, None] / (QUOTIENT_MAX + 1.0)
-        normalized_multiplier = multiplier[:, None] / (RADIX - 1)
-        return torch.stack(
-            (
-                raw / (MAX_RAW_COEFFICIENT + 1.0),
-                torch.tanh(raw / RADIX),
-                accumulator / (RADIX - 1),
-                multiplicand / (RADIX - 1),
-                modulus / (RADIX - 1),
-                normalized_quotient.expand_as(raw),
-                normalized_multiplier.expand_as(raw),
-                positions,
-                torch.sin(2.0 * math.pi * positions),
-                torch.cos(2.0 * math.pi * positions),
-            ),
-            dim=-1,
-        )
+    @staticmethod
+    def _normalize_coefficients(
+        coefficients: Tensor,
+        *,
+        hard: bool,
+    ) -> tuple[Tensor, Tensor]:
+        carry = coefficients.new_zeros(coefficients.shape[0])
+        digits: list[Tensor] = []
+        for position in range(EXTENDED_DIGITS):
+            value = coefficients[:, position] + carry
+            soft_carry = value / RADIX
+            integer_carry = torch.floor(soft_carry)
+            digit = value - RADIX * integer_carry.detach()
+            carry = (
+                integer_carry
+                if hard
+                else integer_carry + soft_carry - soft_carry.detach()
+            )
+            digits.append(digit)
+        return torch.stack(digits, dim=1), carry
 
 
 class CoarseRadixModel(nn.Module):
@@ -331,7 +260,6 @@ class CoarseRadixModel(nn.Module):
             nn.Linear(WIDTH, NUM_DECIMAL_DIGITS),
         )
         self.special_logits = nn.Parameter(torch.empty(DIGIT_OFFSET))
-        self.gate_temperature = 2.0
         self.register_buffer(
             "radix_powers",
             RADIX ** torch.arange(STATE_DIGITS, dtype=torch.long),
@@ -353,7 +281,7 @@ class CoarseRadixModel(nn.Module):
 
     @staticmethod
     def _initialize(module: nn.Module) -> None:
-        if isinstance(module, (nn.Linear, nn.GRU)):
+        if isinstance(module, nn.Linear):
             for name, parameter in module.named_parameters(recurse=False):
                 if "weight" in name:
                     nn.init.normal_(parameter, mean=0.0, std=0.02)
@@ -401,7 +329,6 @@ class CoarseRadixModel(nn.Module):
             ) = self.transition(
                 state[active_indices],
                 modulus_digits[active_indices],
-                self.gate_temperature,
                 not self.training,
             )
             state = state.index_copy(0, active_indices, proposal)
@@ -589,16 +516,14 @@ class DeviceAdamW(torch.optim.Optimizer):
 
 
 class WallClockSchedule:
-    """Coordinate the learning rate and categorical temperature."""
+    """Coordinate the wall-clock learning-rate schedule."""
 
     def __init__(
         self,
         optimizer: torch.optim.Optimizer,
         training_time_seconds: float,
-        model: CoarseRadixModel,
     ) -> None:
         self.optimizer = optimizer
-        self.model = model
         self.base_lrs = [group["lr"] for group in optimizer.param_groups]
         self.training_time_seconds = max(float(training_time_seconds), 1e-3)
         self.started_at = time.monotonic()
@@ -613,7 +538,6 @@ class WallClockSchedule:
             (time.monotonic() - self.started_at) / self.training_time_seconds,
             1.0,
         )
-        self.model.gate_temperature = 2.0 * (0.05 / 2.0) ** progress
         if progress < WARMUP_FRACTION:
             multiplier = (
                 MIN_LEARNING_RATE_RATIO
@@ -654,9 +578,7 @@ def build_optimizer(
         betas=(0.9, 0.98),
         eps=1e-8,
     )
-    if not isinstance(model, CoarseRadixModel):
-        raise TypeError("unexpected model type")
-    scheduler = WallClockSchedule(optimizer, spec.training_time_seconds, model)
+    scheduler = WallClockSchedule(optimizer, spec.training_time_seconds)
     return OptimizerBundle(optimizer, scheduler)
 
 

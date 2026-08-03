@@ -761,3 +761,41 @@ The counterintuitive simplification therefore identifies quotient factorization 
 The serial circuit's learned seven-position carry and digit normalization still cannot satisfy exact local value preservation within the fixed update budget.
 The counterintuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
 The next intuitive experiment should keep the learned scalar quotient but replace the carry GRU and digit categories with an exact parameter-free radix-normalization recurrence equipped with straight-through surrogate gradients, reserving learned capacity for quotient selection while making representation conversion correct by construction.
+
+## L22: Exact radix normalization
+
+Date: 2026-08-02.
+
+Idea class: intuitive.
+
+Status: rejected before hosted submission because one required suite failed.
+
+The hypothesis was that L21's scalar quotient supplied the only task-dependent decision required by the serial Horner reducer, while its learned carry GRU and digit categories wasted capacity and update time approximating a representation conversion that could be correct by construction.
+L22 retained L21's base-16 state, six tied Horner microsteps, scalar quotient MLP with straight-through integer rounding, local range constraints, final radix supervision, detached Fourier decoder, optimizer, and schedule.
+It replaced the carry GRU and digit head with a parameter-free low-to-high recurrence: each coefficient plus incoming carry was divided by 16, the carry was floored, and the remainder became the exact hexadecimal digit.
+The training forward used those same integer values with identity-style surrogate gradients through the carry recurrence; evaluation used the literal integer recurrence.
+An exact integer test over 4,096 randomly generated signed coefficient vectors verified radix bounds and reconstruction including the final carry, while a separate floating-point check verified finite nonzero surrogate gradients.
+The change reduced persistent state from 38,057 to 22,353 elements and added no learned state, labels, lookup memory, enumeration, dataset branch, or T-specialized operator.
+
+The frozen candidate was screened with the same official datasets, splits, Apple M2 Pro device, 30-second Easy budgets, and 60-second Medium budgets as L21.
+
+| Dataset | Updates | Test | OOD | Mean exact accuracy | Max T | OOD N Max T |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| E1 | 351 | 4.67% | 9.00% | 6.83% | <1 | <1 |
+| E2 | 286 | 0.83% | 0.33% | 0.58% | <1 | <1 |
+| E3 | 701 | 1.00% | 2.25% | 1.63% | <1 | <1 |
+| E4 | 697 | 0.37% | 1.33% | 0.85% | <1 | <1 |
+| E5 | 307 | 1.33% | 1.50% | 1.42% | <1 | <1 |
+| M1 | 5 | failed: non-finite loss | failed | failed | failed | failed |
+| M2 | 183 | 0.00% | 0.00% | 0.00% | <1 | <1 |
+| M3 | 921 | 0.50% | 0.47% | 0.48% | <1 | <1 |
+| M4 | 245 | 0.01% | 0.01% | 0.01% | <1 | <1 |
+| M5 | 241 | 0.10% | 0.07% | 0.08% | <1 | <1 |
+
+Exact normalization substantially improved throughput, raising E3 and E4 from 563 to about 700 updates and roughly doubling several deeper-family update counts, but it did not improve the target arithmetic.
+E3 fell from 1.69% to 1.63%, E4 was effectively unchanged at 0.85%, M2 fell to zero, M4 fell from 0.18% to 0.01%, and M1's loss became non-finite at update 5.
+M3 rose from 0.27% to 0.48%, but that isolated chance-scale change did not offset the accuracy and coverage regressions, and no successful familiar- or unseen-modulus profile certified T=1.
+The quotient signal remained grossly unsolved despite the additional updates: final total losses ranged from 64.34 to 146.69 across successful suites, including 126.94 on E3 and 113.39 on E4, while decimal evaluation losses stayed near 2.3.
+Because the representation recurrence is exact, its final-carry and reconstruction penalties are algebraically redundant with the local requirement that the reduced value lie in `[0, N)`; their much larger dynamic range appears to dominate rather than clarify quotient learning.
+The intuitive hypothesis is rejected, no hosted quota was consumed, and the hosted results stores remain unchanged.
+The next counterintuitive experiment should retain exact normalization but delete the redundant final-carry and reconstruction penalties, training each rounded quotient only through the uniquely identifying dimensionless interval constraint plus official endpoint supervision.
