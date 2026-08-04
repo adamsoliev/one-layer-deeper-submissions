@@ -1,6 +1,6 @@
 # [One Layer Deeper](https://blog.tilderesearch.com/blog/one-layer-deeper)
 
-how to think longer or different ways of structuring and allocating computation
+how to think longer vs transformer/CoT
 * looped layers
     * universal transformers/adaptive computation time
     * deep equilibrium models
@@ -21,8 +21,7 @@ benchmark
 * testing depth > training depth
 
 ask
-
-model | optimizer | learning rate scheduler | loss function
+* model | optimizer | learning rate scheduler | loss function
 
 ## Scope
 
