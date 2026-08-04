@@ -20,6 +20,9 @@ benchmark
 * can't be memorized
 * testing depth > training depth
 
+ask
+model | optimizer | learning rate scheduler | loss function
+
 ## Scope
 
 The motivating limitation is not that every Transformer has exactly 100 layers, but that its serial computational depth is fixed at training time and is usually only tens to low hundreds of layers.
