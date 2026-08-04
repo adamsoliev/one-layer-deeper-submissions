@@ -1,4 +1,4 @@
-"""T-controlled Universal Transformer for repeated modular squaring.
+"""Universal Transformer with a convolutional transition function.
 
 Architecture references:
 - https://arxiv.org/abs/1807.03819v3
@@ -20,56 +20,94 @@ from benchmark import (
 )
 from torch import Tensor, nn
 
-D_MODEL = 128
-NUM_HEADS = 4
-FFN_DIM = 4 * D_MODEL
-MAX_RECURRENT_STEPS = 64
-LEARNING_RATE = 1e-3
-WEIGHT_DECAY = 0.1
-T_TOKEN_ID = 4
-DIGIT_OFFSET = 7
-NUM_DIGITS = 10
-
 
 class Config:
-    def __init__(self, vocab_size: int, max_seq_len: int) -> None:
+    """Architecture hyperparameters for a basic Universal Transformer."""
+
+    def __init__(
+        self,
+        vocab_size: int,
+        max_seq_len: int,
+        *,
+        hidden_size: int = 128,
+        filter_size: int = 512,
+        num_heads: int = 4,
+        num_recurrent_steps: int = 6,
+        first_kernel_size: int = 3,
+        second_kernel_size: int = 5,
+        layer_dropout: float = 0.1,
+        attention_dropout: float = 0.1,
+        transition_dropout: float = 0.1,
+    ) -> None:
+        if hidden_size % num_heads:
+            raise ValueError("hidden_size must be divisible by num_heads")
+        if hidden_size % 2:
+            raise ValueError("hidden_size must be even for sinusoidal positions")
+        if num_recurrent_steps < 1:
+            raise ValueError("num_recurrent_steps must be positive")
+        if first_kernel_size % 2 != 1 or second_kernel_size % 2 != 1:
+            raise ValueError("convolution kernels must be odd")
+        for dropout in (
+            layer_dropout,
+            attention_dropout,
+            transition_dropout,
+        ):
+            if not 0.0 <= dropout < 1.0:
+                raise ValueError("dropout probabilities must be in [0, 1)")
         self.vocab_size = vocab_size
         self.max_seq_len = max_seq_len
+        self.hidden_size = hidden_size
+        self.filter_size = filter_size
+        self.num_heads = num_heads
+        self.num_recurrent_steps = num_recurrent_steps
+        self.first_kernel_size = first_kernel_size
+        self.second_kernel_size = second_kernel_size
+        self.layer_dropout = layer_dropout
+        self.attention_dropout = attention_dropout
+        self.transition_dropout = transition_dropout
 
 
-class SinusoidalEncoding(nn.Module):
-    """Encode positions or recurrent steps without a learned depth limit."""
+class SinusoidalPositionEncoding(nn.Module):
+    """Return the fixed horizontal timing signal from the UT paper."""
 
     def __init__(self, width: int) -> None:
         super().__init__()
         frequencies = torch.exp(-math.log(10_000.0) * torch.arange(0, width, 2) / width)
         self.register_buffer("frequencies", frequencies, persistent=False)
 
-    def forward(self, coordinates: Tensor, dtype: torch.dtype) -> Tensor:
-        angles = coordinates.float().unsqueeze(-1) * self.frequencies
+    def forward(
+        self,
+        length: int,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Tensor:
+        positions = torch.arange(length, device=device, dtype=torch.float32)
+        angles = positions.unsqueeze(-1) * self.frequencies
         return torch.stack((angles.sin(), angles.cos()), dim=-1).flatten(-2).to(dtype)
 
 
-class RecurrentTransformerBlock(nn.Module):
-    """One self-attention and position-wise transition shared across depth."""
+class MultiHeadSelfAttention(nn.Module):
+    """Multi-head scaled dot-product self-attention."""
 
-    def __init__(self) -> None:
+    def __init__(self, config: Config) -> None:
         super().__init__()
-        self.attention_norm = nn.LayerNorm(D_MODEL)
-        self.qkv = nn.Linear(D_MODEL, 3 * D_MODEL)
-        self.attention_output = nn.Linear(D_MODEL, D_MODEL)
-        self.transition_norm = nn.LayerNorm(D_MODEL)
-        self.transition_up = nn.Linear(D_MODEL, FFN_DIM)
-        self.transition_down = nn.Linear(FFN_DIM, D_MODEL)
+        self.num_heads = config.num_heads
+        self.hidden_size = config.hidden_size
+        self.dropout = config.attention_dropout
+        self.qkv = nn.Linear(config.hidden_size, 3 * config.hidden_size, bias=False)
+        self.output = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
 
     def forward(self, state: Tensor, attention_mask: Tensor | None) -> Tensor:
-        residual = state
-        state = self.attention_norm(state)
         batch_size, sequence_length, _ = state.shape
         query, key, value = self.qkv(state).chunk(3, dim=-1)
-        query = query.view(batch_size, sequence_length, NUM_HEADS, -1).transpose(1, 2)
-        key = key.view(batch_size, sequence_length, NUM_HEADS, -1).transpose(1, 2)
-        value = value.view(batch_size, sequence_length, NUM_HEADS, -1).transpose(1, 2)
+        query = query.view(batch_size, sequence_length, self.num_heads, -1).transpose(
+            1, 2
+        )
+        key = key.view(batch_size, sequence_length, self.num_heads, -1).transpose(1, 2)
+        value = value.view(batch_size, sequence_length, self.num_heads, -1).transpose(
+            1, 2
+        )
 
         mask = None
         if attention_mask is not None:
@@ -90,6 +128,7 @@ class RecurrentTransformerBlock(nn.Module):
             key,
             value,
             attn_mask=mask,
+            dropout_p=self.dropout if self.training else 0.0,
         )
         state = (
             state.transpose(1, 2)
@@ -97,29 +136,99 @@ class RecurrentTransformerBlock(nn.Module):
             .view(
                 batch_size,
                 sequence_length,
-                D_MODEL,
+                self.hidden_size,
             )
         )
-        state = residual + self.attention_output(state)
-        transition = self.transition_down(
-            F.relu(self.transition_up(self.transition_norm(state)))
+        return self.output(state)
+
+
+class SeparableConvolution(nn.Module):
+    """Depthwise convolution followed by a pointwise channel projection."""
+
+    def __init__(self, input_size: int, output_size: int, kernel_size: int) -> None:
+        super().__init__()
+        self.depthwise = nn.Conv1d(
+            input_size,
+            input_size,
+            kernel_size,
+            padding=kernel_size // 2,
+            groups=input_size,
+            bias=False,
         )
-        return state + transition
+        self.pointwise = nn.Conv1d(input_size, output_size, 1)
+
+    def forward(self, state: Tensor) -> Tensor:
+        state = state.transpose(1, 2)
+        state = self.pointwise(self.depthwise(state))
+        return state.transpose(1, 2)
+
+
+class ConvolutionalTransition(nn.Module):
+    """The paper's separable-convolution transition function."""
+
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        self.first = SeparableConvolution(
+            config.hidden_size,
+            config.filter_size,
+            config.first_kernel_size,
+        )
+        self.second = SeparableConvolution(
+            config.filter_size,
+            config.hidden_size,
+            config.second_kernel_size,
+        )
+        self.dropout = nn.Dropout(config.transition_dropout)
+
+    def forward(self, state: Tensor, token_mask: Tensor) -> Tensor:
+        state = state.masked_fill(~token_mask[:, :, None], 0.0)
+        state = self.dropout(F.relu(self.first(state)))
+        state = state.masked_fill(~token_mask[:, :, None], 0.0)
+        return self.second(state)
+
+
+class RecurrentTransformerBlock(nn.Module):
+    """One attention-plus-convolution block shared across recurrent depth."""
+
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        self.attention_norm = nn.LayerNorm(config.hidden_size)
+        self.attention = MultiHeadSelfAttention(config)
+        self.transition_norm = nn.LayerNorm(config.hidden_size)
+        self.transition = ConvolutionalTransition(config)
+        self.residual_dropout = nn.Dropout(config.layer_dropout)
+
+    def forward(
+        self,
+        state: Tensor,
+        attention_mask: Tensor | None,
+        token_mask: Tensor,
+    ) -> Tensor:
+        attention = self.attention(self.attention_norm(state), attention_mask)
+        state = state + self.residual_dropout(attention)
+        transition = self.transition(self.transition_norm(state), token_mask)
+        state = state + self.residual_dropout(transition)
+        return state.masked_fill(~token_mask[:, :, None], 0.0)
 
 
 class UniversalTransformer(nn.Module):
-    """Refine every token in parallel for the number of steps encoded by T."""
+    """Basic fixed-depth Universal Transformer encoder with tied parameters."""
 
-    num_loops = MAX_RECURRENT_STEPS
-
-    def __init__(self, spec: ModelSpec) -> None:
+    def __init__(self, config: Config) -> None:
         super().__init__()
-        self.config = Config(spec.vocab_size, spec.max_seq_len)
-        self.token_embedding = nn.Embedding(spec.vocab_size, D_MODEL)
-        self.coordinate_encoding = SinusoidalEncoding(D_MODEL)
-        self.recurrent_block = RecurrentTransformerBlock()
-        self.output_norm = nn.LayerNorm(D_MODEL)
-        self.output = nn.Linear(D_MODEL, spec.vocab_size, bias=False)
+        self.config = config
+        self.num_loops = config.num_recurrent_steps
+        self.token_embedding = nn.Embedding(config.vocab_size, config.hidden_size)
+        self.position_encoding = SinusoidalPositionEncoding(config.hidden_size)
+        self.step_embedding = nn.Embedding(
+            config.num_recurrent_steps,
+            config.hidden_size,
+        )
+        nn.init.normal_(self.step_embedding.weight)
+        self.input_dropout = nn.Dropout(config.layer_dropout)
+        self.recurrent_block = RecurrentTransformerBlock(config)
+        self.output_norm = nn.LayerNorm(config.hidden_size)
+        self.output = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.output.weight = self.token_embedding.weight
 
     def forward(
@@ -128,138 +237,38 @@ class UniversalTransformer(nn.Module):
         attention_mask: Tensor | None = None,
     ) -> tuple[Tensor, None]:
         token_mask = self._token_mask(input_ids, attention_mask)
-        time_steps = self._parse_time_steps(input_ids, token_mask)
-        recurrent_steps = int(time_steps.amax().item())
         model_attention_mask = token_mask if attention_mask is None else attention_mask
 
-        state = self.token_embedding(input_ids)
-        positions = torch.arange(
-            1,
-            input_ids.shape[1] + 1,
+        state = self.input_dropout(self.token_embedding(input_ids))
+        position_signal = self.position_encoding(
+            input_ids.shape[1],
             device=input_ids.device,
+            dtype=state.dtype,
         )
-        position_signal = self.coordinate_encoding(positions, state.dtype)[None, :, :]
 
-        for step in range(recurrent_steps):
-            step_coordinate = torch.tensor(step + 1, device=input_ids.device)
-            step_signal = self.coordinate_encoding(step_coordinate, state.dtype)
-            proposal = self.recurrent_block(
-                state + position_signal + step_signal,
+        for step in range(self.config.num_recurrent_steps):
+            step_signal = self.step_embedding.weight[step].to(state.dtype)
+            state = self.recurrent_block(
+                state + position_signal[None, :, :] + step_signal,
                 model_attention_mask,
+                token_mask,
             )
-            active = (time_steps > step)[:, None, None]
-            state = torch.where(active, proposal, state)
-            state = state.masked_fill(~token_mask[:, :, None], 0.0)
 
         return self.output(self.output_norm(state)), None
 
     @staticmethod
     def _token_mask(input_ids: Tensor, attention_mask: Tensor | None) -> Tensor:
         if attention_mask is None:
-            return input_ids != 0
+            return torch.ones_like(input_ids, dtype=torch.bool)
         if attention_mask.ndim == 2:
             return attention_mask.to(device=input_ids.device, dtype=torch.bool)
         if attention_mask.ndim == 3:
-            return attention_mask.any(dim=1).to(device=input_ids.device)
+            return attention_mask.any(dim=-1).to(device=input_ids.device)
         raise ValueError("invalid attention_mask rank")
-
-    @staticmethod
-    def _parse_time_steps(input_ids: Tensor, token_mask: Tensor) -> Tensor:
-        time_steps = torch.zeros(
-            input_ids.shape[0],
-            device=input_ids.device,
-            dtype=torch.long,
-        )
-        reading_time = torch.zeros_like(time_steps, dtype=torch.bool)
-        for position in range(input_ids.shape[1]):
-            token = input_ids[:, position]
-            reading_time = reading_time | (token == T_TOKEN_ID)
-            digit = token - DIGIT_OFFSET
-            is_digit = (
-                reading_time
-                & token_mask[:, position]
-                & (digit >= 0)
-                & (digit < NUM_DIGITS)
-            )
-            time_steps = torch.where(is_digit, 10 * time_steps + digit, time_steps)
-        return time_steps.clamp(min=1, max=MAX_RECURRENT_STEPS)
-
-
-class DeviceAdamW(torch.optim.Optimizer):
-    """AdamW with every tensor state stored beside its parameter."""
-
-    def __init__(
-        self,
-        parameters: object,
-        *,
-        lr: float,
-        betas: tuple[float, float],
-        weight_decay: float,
-        eps: float = 1e-8,
-    ) -> None:
-        super().__init__(
-            parameters,
-            {
-                "lr": lr,
-                "betas": betas,
-                "weight_decay": weight_decay,
-                "eps": eps,
-            },
-        )
-
-    @torch.no_grad()
-    def step(self, closure: object = None) -> Tensor | None:
-        loss = None
-        if closure is not None:
-            with torch.enable_grad():
-                loss = closure()
-
-        for group in self.param_groups:
-            learning_rate = float(group["lr"])
-            beta1, beta2 = group["betas"]
-            weight_decay = float(group["weight_decay"])
-            epsilon = float(group["eps"])
-            for parameter in group["params"]:
-                gradient = parameter.grad
-                if gradient is None:
-                    continue
-                if gradient.is_sparse:
-                    raise RuntimeError("DeviceAdamW does not support sparse gradients")
-
-                state = self.state[parameter]
-                if not state:
-                    state["step"] = 0
-                    state["first_moment"] = torch.zeros_like(parameter)
-                    state["second_moment"] = torch.zeros_like(parameter)
-                state["step"] += 1
-
-                first_moment = state["first_moment"]
-                second_moment = state["second_moment"]
-                first_moment.lerp_(gradient, 1.0 - beta1)
-                second_moment.mul_(beta2).addcmul_(
-                    gradient,
-                    gradient,
-                    value=1.0 - beta2,
-                )
-
-                step = state["step"]
-                bias_correction1 = 1.0 - beta1**step
-                bias_correction2 = 1.0 - beta2**step
-                denominator = (
-                    second_moment.sqrt().div_(math.sqrt(bias_correction2)).add_(epsilon)
-                )
-                parameter.mul_(1.0 - learning_rate * weight_decay)
-                parameter.addcdiv_(
-                    first_moment,
-                    denominator,
-                    value=-learning_rate / bias_correction1,
-                )
-
-        return loss
 
 
 def build_model(spec: ModelSpec) -> UniversalTransformer:
-    model = UniversalTransformer(spec)
+    model = UniversalTransformer(Config(spec.vocab_size, spec.max_seq_len))
     assert_model_state(model, spec)
     return model
 
@@ -268,13 +277,13 @@ def build_optimizer(
     model: nn.Module,
     spec: OptimizerSpec,
 ) -> OptimizerBundle:
-    del spec
     return OptimizerBundle(
-        DeviceAdamW(
+        torch.optim.Adam(
             model.parameters(),
-            lr=LEARNING_RATE,
-            betas=(0.9, 0.95),
-            weight_decay=WEIGHT_DECAY,
+            lr=1e-3,
+            betas=(0.9, 0.98),
+            eps=1e-9,
+            capturable=spec.device_type == "cuda",
         )
     )
 
