@@ -1,6 +1,6 @@
 ---
 name: read-arxiv-paper
-description: Read and analyze an arXiv paper from an arXiv abstract, PDF, or source URL by downloading its TeX source, following the LaTeX document graph, and writing a repository-local research summary connected to the One Layer Deeper competition. Use when asked to read, explain, summarize, critique, or extract implementation and experiment ideas from an arXiv paper for this repository.
+description: Read and analyze an arXiv paper from an arXiv abstract, PDF, or source URL by downloading its TeX source, following the LaTeX document graph, and connecting its findings to the One Layer Deeper competition. Use when asked to read, explain, summarize, critique, or extract implementation and experiment ideas from an arXiv paper for this repository.
 ---
 
 # Read an arXiv Paper
@@ -42,16 +42,17 @@ Do not present an extrapolation from the paper as a result reported by the autho
 ## Connect it to this repository
 
 Read `README.md` and `submission.py` before making repository-specific recommendations.
-Inspect `scripts/` and `tests/` when the paper affects evaluation, training, or submission mechanics.
+Inspect `scripts/` when the paper affects evaluation, training, or submission mechanics.
 Relate relevant ideas to repeated modular squaring, systematic generalization to unseen `T`, generalization to unseen `N`, tied recurrent transitions, working-state design, halting or progress tracking, token-level decoding, the fixed model-state limit, and the H100 time budget.
-Map architectural proposals onto the encoder, recurrent state, tied transition, and decoder decomposition described in `README.md`.
-Map implementation proposals onto concrete classes, functions, losses, schedules, or constants in `submission.py`.
+Map architectural and implementation proposals onto concrete embeddings, recurrent state, tied transitions, timing signals, readouts, losses, schedules, or constants in `submission.py`.
 Say explicitly when a paper has weak or no direct relevance to the competition.
 Do not modify the model or submit an experiment unless the user separately asks for implementation or submission.
 
-## Write the research note
+## Preserve requested findings
 
-Create `resources/` when needed and write the result to `resources/summary_{tag}.md`.
+Do not create a separate research artifact unless the user requests one.
+Use the user's path when provided; otherwise write the result to `summary_{tag}.md` at the repository root.
+Do not recreate `resources/`.
 Choose a short descriptive `tag` and never overwrite an existing note.
 Use one sentence per source line and follow the repository's Markdown style.
 Include the paper title, authors, arXiv identifier and version, source URL, and the date read.
