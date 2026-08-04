@@ -56,13 +56,15 @@ Do not recreate `resources/`.
 Choose a short descriptive `tag` and never overwrite an existing note.
 Use one sentence per source line and follow the repository's Markdown style.
 Include the paper title, authors, arXiv identifier and version, source URL, and the date read.
-Organize the note around these questions:
-
-1. What does the paper actually claim, and what evidence supports or limits that claim?
-2. What is the mechanism and its intuitive explanation?
-3. Which parts matter for learned iterative computation and depth or modulus generalization in One Layer Deeper?
-4. How could the idea map onto `submission.py` within the competition constraints?
-5. What is the smallest decisive experiment, and what outcome would confirm or falsify the hypothesis?
-
-End with concrete implementation hypotheses, expected failure modes, and unresolved questions.
-Reference paper sections, figures, tables, and equations precisely enough that a reader can verify the analysis.
+Treat the abstract as the authors' primary summary and do not replace it with an agent-generated synopsis.
+Follow [The Annotated Transformer](https://nlp.seas.harvard.edu/annotated-transformer/) pattern: preserve the source order and interleave original passages with commentary at the point where clarification is useful.
+Add one `## Annotated abstract` section and present the abstract one sentence or short passage at a time.
+Render each source passage as a Markdown blockquote, then place its annotation immediately below it.
+Use annotations to define terms, expose assumptions, add missing context, identify emphasis, distinguish reported evidence from interpretation, and point to the paper sections, figures, tables, or equations that substantiate the passage.
+Connect a passage to One Layer Deeper only when the connection is concrete, and distinguish the authors' claim from the repository-specific inference.
+Do not silently rewrite quoted text; mark omissions, insertions, and emphasis explicitly.
+Check the paper's license before reproducing the complete abstract verbatim.
+When the license permits redistribution, reproduce the abstract exactly with attribution.
+Otherwise quote only short passages and provide a faithful sentence-by-sentence paraphrase in the same order.
+Do not add separate summary, mechanism, experiment, implementation-hypothesis, failure-mode, or unresolved-question sections.
+End the note when the annotated abstract ends.
