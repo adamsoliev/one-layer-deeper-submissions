@@ -63,8 +63,5 @@ Render each source passage as a Markdown blockquote, then place its annotation i
 Use annotations to define terms, expose assumptions, add missing context, identify emphasis, distinguish reported evidence from interpretation, and point to the paper sections, figures, tables, or equations that substantiate the passage.
 Connect a passage to One Layer Deeper only when the connection is concrete, and distinguish the authors' claim from the repository-specific inference.
 Do not silently rewrite quoted text; mark omissions, insertions, and emphasis explicitly.
-Check the paper's license before reproducing the complete abstract verbatim.
-When the license permits redistribution, reproduce the abstract exactly with attribution.
-Otherwise quote only short passages and provide a faithful sentence-by-sentence paraphrase in the same order.
 Do not add separate summary, mechanism, experiment, implementation-hypothesis, failure-mode, or unresolved-question sections.
 End the note when the annotated abstract ends.
