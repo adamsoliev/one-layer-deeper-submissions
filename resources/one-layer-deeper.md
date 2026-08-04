@@ -1,4 +1,24 @@
-# One Layer Deeper
+# [One Layer Deeper](https://blog.tilderesearch.com/blog/one-layer-deeper)
+
+how to think longer or different ways of structuring and allocating computation
+* looped layers
+    * universal transformers/adaptive computation time
+    * deep equilibrium models
+    * deep thinking models
+* recurrent state updates
+* attractor-style models
+* other forms of latent computation
+
+questions
+* can the architecture represent the required computation?
+* can optimization discover the correct computation?
+* can that co-design generalize beyond training depth?
+
+benchmark
+* inherently serial
+* no shortcut
+* can't be memorized
+* testing depth > training depth
 
 ## Scope
 
@@ -71,7 +91,6 @@ The final subsection is deliberately qualified because speculative decoding pres
 ### Surveys and framing
 
 - [Barriers to Discrete Reasoning with Transformers: A Survey Across Depth, Exactness, and Bandwidth](https://aclanthology.org/2026.eacl-long.87/) synthesizes circuit-complexity, approximation, and communication-complexity barriers to exact symbolic computation.
-- [What Formal Languages Can Transformers Express? A Survey](https://aclanthology.org/2024.tacl-1.30/) reconciles results that use different attention, precision, uniformity, and positional-encoding assumptions.
 - [A Survey on Latent Reasoning](https://arxiv.org/abs/2507.06203) organizes activation recurrence, hidden-state propagation, trace compression, and diffusion-based latent reasoning.
 - [What comes after transformers? — A selective survey connecting ideas in deep learning](https://arxiv.org/abs/2408.00386) surveys potentially disruptive alternatives as well as incremental improvements.
 - [The Serial Scaling Hypothesis](https://serial-scaling-hypothesis.github.io/) is a technical essay separating a fixed Transformer's constant-depth forward pass from the unbounded serial computation supplied by recurrent or autoregressive execution.
@@ -102,12 +121,7 @@ The final subsection is deliberately qualified because speculative decoding pres
 ### Chain-of-thought as externalized computational depth
 
 - [Towards Revealing the Mystery behind Chain of Thought: A Theoretical Perspective](https://arxiv.org/abs/2305.15408) shows that bounded-depth Transformers need super-polynomial size for some arithmetic problems without intermediate steps, while chain-of-thought supplies effective depth.
-- [The Expressive Power of Transformers with Chain of Thought](https://arxiv.org/abs/2310.07923) studies how intermediate output tokens expand a decoder-only Transformer's computational class.
-- [Chain of Thought Empowers Transformers to Solve Inherently Serial Problems](https://openreview.net/forum?id=3EWTEy9MTM) ties the required number of chain-of-thought steps to a problem's serial complexity.
-- [Lower Bounds for Chain-of-Thought Reasoning in Hard-Attention Transformers](https://openreview.net/forum?id=Oh9sG5ae2b) proves that some problems require long chains rather than merely benefiting from them.
 - [Compositional Reasoning with Transformers, RNNs, and Chain of Thought](https://arxiv.org/abs/2503.01544) shows that model depth, width, recurrent steps, or chain-of-thought length must grow with compositional depth.
-- [Quantifying the Necessity of Chain of Thought through Opaque Serial Depth](https://arxiv.org/abs/2603.09786) measures how much serial computation can remain hidden inside a fixed-depth model before intermediate tokens become necessary.
-- [Time-for-Accuracy: Formalizing Chain-of-Thought as an Expansion of Logical Depth](https://aclanthology.org/2026.findings-acl.1938/) interprets a thought-token budget as a cap on sequential computation and distinguishes useful logical depth from redundant trace length.
 
 ### Empirical and mechanistic evidence
 
