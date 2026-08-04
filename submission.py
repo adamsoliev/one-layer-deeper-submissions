@@ -1,4 +1,4 @@
-"""Universal Transformer with a convolutional transition function.
+"""Adaptive Universal Transformer with a convolutional transition function.
 
 Architecture references:
 - https://arxiv.org/abs/1807.03819v3
@@ -22,7 +22,7 @@ from torch import Tensor, nn
 
 
 class Config:
-    """Architecture hyperparameters for a basic Universal Transformer."""
+    """Architecture hyperparameters for an Adaptive Universal Transformer."""
 
     def __init__(
         self,
@@ -32,7 +32,10 @@ class Config:
         hidden_size: int = 128,
         filter_size: int = 512,
         num_heads: int = 4,
-        num_recurrent_steps: int = 6,
+        act_max_steps: int = 12,
+        act_epsilon: float = 0.01,
+        act_halting_bias_init: float = 1.0,
+        act_loss_weight: float = 0.01,
         first_kernel_size: int = 3,
         second_kernel_size: int = 5,
         layer_dropout: float = 0.1,
@@ -43,8 +46,12 @@ class Config:
             raise ValueError("hidden_size must be divisible by num_heads")
         if hidden_size % 2:
             raise ValueError("hidden_size must be even for sinusoidal positions")
-        if num_recurrent_steps < 1:
-            raise ValueError("num_recurrent_steps must be positive")
+        if act_max_steps < 1:
+            raise ValueError("act_max_steps must be positive")
+        if not 0.0 < act_epsilon < 1.0:
+            raise ValueError("act_epsilon must be in (0, 1)")
+        if act_loss_weight < 0.0:
+            raise ValueError("act_loss_weight must be non-negative")
         if first_kernel_size % 2 != 1 or second_kernel_size % 2 != 1:
             raise ValueError("convolution kernels must be odd")
         for dropout in (
@@ -59,7 +66,10 @@ class Config:
         self.hidden_size = hidden_size
         self.filter_size = filter_size
         self.num_heads = num_heads
-        self.num_recurrent_steps = num_recurrent_steps
+        self.act_max_steps = act_max_steps
+        self.act_epsilon = act_epsilon
+        self.act_halting_bias_init = act_halting_bias_init
+        self.act_loss_weight = act_loss_weight
         self.first_kernel_size = first_kernel_size
         self.second_kernel_size = second_kernel_size
         self.layer_dropout = layer_dropout
@@ -212,19 +222,21 @@ class RecurrentTransformerBlock(nn.Module):
 
 
 class UniversalTransformer(nn.Module):
-    """Basic fixed-depth Universal Transformer encoder with tied parameters."""
+    """Adaptive Universal Transformer encoder with per-position halting."""
 
     def __init__(self, config: Config) -> None:
         super().__init__()
         self.config = config
-        self.num_loops = config.num_recurrent_steps
+        self.num_loops = config.act_max_steps
         self.token_embedding = nn.Embedding(config.vocab_size, config.hidden_size)
         self.position_encoding = SinusoidalPositionEncoding(config.hidden_size)
         self.step_embedding = nn.Embedding(
-            config.num_recurrent_steps,
+            config.act_max_steps,
             config.hidden_size,
         )
         nn.init.normal_(self.step_embedding.weight)
+        self.halting_projection = nn.Linear(config.hidden_size, 1)
+        nn.init.constant_(self.halting_projection.bias, config.act_halting_bias_init)
         self.input_dropout = nn.Dropout(config.layer_dropout)
         self.recurrent_block = RecurrentTransformerBlock(config)
         self.output_norm = nn.LayerNorm(config.hidden_size)
@@ -235,26 +247,75 @@ class UniversalTransformer(nn.Module):
         self,
         input_ids: Tensor,
         attention_mask: Tensor | None = None,
-    ) -> tuple[Tensor, None]:
+    ) -> tuple[Tensor, dict[str, Tensor]]:
         token_mask = self._token_mask(input_ids, attention_mask)
         model_attention_mask = token_mask if attention_mask is None else attention_mask
 
         state = self.input_dropout(self.token_embedding(input_ids))
+        state = state.masked_fill(~token_mask[:, :, None], 0.0)
         position_signal = self.position_encoding(
             input_ids.shape[1],
             device=input_ids.device,
             dtype=state.dtype,
         )
 
-        for step in range(self.config.num_recurrent_steps):
+        halting_probability = (~token_mask).to(state.dtype)
+        remainders = state.new_zeros(token_mask.shape)
+        ponder_times = state.new_zeros(token_mask.shape)
+        weighted_state = torch.zeros_like(state)
+        threshold = 1.0 - self.config.act_epsilon
+
+        for step in range(self.config.act_max_steps):
+            active = (
+                (halting_probability < threshold)
+                & (ponder_times < self.config.act_max_steps)
+                & token_mask
+            )
+            if not active.any().item():
+                break
+
             step_signal = self.step_embedding.weight[step].to(state.dtype)
+            timed_state = state + position_signal[None, :, :] + step_signal
+            halting_scores = torch.sigmoid(
+                self.halting_projection(timed_state).squeeze(-1)
+            )
+            still_running = (halting_probability < 1.0) & token_mask
+            new_halted = (
+                halting_probability + halting_scores * still_running > threshold
+            ) & still_running
+            still_running = (
+                halting_probability + halting_scores * still_running <= threshold
+            ) & still_running
+
+            halting_probability = halting_probability + halting_scores * still_running
+            step_remainders = new_halted * (1.0 - halting_probability)
+            remainders = remainders + step_remainders
+            halting_probability = halting_probability + step_remainders
+            ponder_times = ponder_times + still_running + new_halted
+            update_weights = (
+                halting_scores * still_running + step_remainders
+            ).unsqueeze(-1)
+
             state = self.recurrent_block(
-                state + position_signal[None, :, :] + step_signal,
+                timed_state,
                 model_attention_mask,
                 token_mask,
             )
+            weighted_state = state * update_weights + weighted_state * (
+                1.0 - update_weights
+            )
 
-        return self.output(self.output_norm(state)), None
+        valid_positions = token_mask.sum().clamp_min(1)
+        act_loss = self.config.act_loss_weight * (
+            ((ponder_times + remainders) * token_mask).sum() / valid_positions
+        )
+        logits = self.output(self.output_norm(weighted_state))
+        auxiliary = {
+            "ponder_times": ponder_times,
+            "remainders": remainders,
+            "act_loss": act_loss,
+        }
+        return logits, auxiliary
 
     @staticmethod
     def _token_mask(input_ids: Tensor, attention_mask: Tensor | None) -> Tensor:
@@ -288,7 +349,17 @@ def build_optimizer(
     )
 
 
+def training_loss(
+    logits: Tensor,
+    labels: Tensor,
+    auxiliary: dict[str, Tensor],
+) -> Tensor:
+    """Combine token cross-entropy with the ACT ponder penalty."""
+    return F.cross_entropy(logits, labels) + auxiliary["act_loss"]
+
+
 SUBMISSION = Submission(
     build_model=build_model,
     build_optimizer=build_optimizer,
+    training_loss=training_loss,
 )
