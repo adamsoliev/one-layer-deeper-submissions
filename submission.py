@@ -3,6 +3,24 @@
 Architecture references:
 - https://arxiv.org/abs/1807.03819v3
 - https://github.com/tensorflow/tensor2tensor/blob/master/tensor2tensor/models/research/universal_transformer_util.py
+
+Tensor shape suffixes use the following dimension key:
+- B: batch size
+- S: source sequence length
+- T: target/decoder sequence length
+- L: sequence or attention-query length inside reusable components
+- M: attention-memory length
+- D: model hidden size
+- V: vocabulary size
+- F: convolutional transition hidden size
+- H: number of attention heads
+- K: channels per attention head (D / H)
+- C: generic convolution input channels
+- O: generic convolution output channels
+- R: number of sinusoidal frequencies (D / 2)
+
+Suffix letters appear in physical axis order. Scalar tensors and heterogeneous
+tensor containers do not carry a shape suffix.
 """
 
 from __future__ import annotations
@@ -96,8 +114,10 @@ class SinusoidalPositionEncoding(nn.Module):
 
     def __init__(self, width: int) -> None:
         super().__init__()
-        frequencies = torch.exp(-math.log(10_000.0) * torch.arange(0, width, 2) / width)
-        self.register_buffer("frequencies", frequencies, persistent=False)
+        frequencies_R = torch.exp(
+            -math.log(10_000.0) * torch.arange(0, width, 2) / width
+        )
+        self.register_buffer("frequencies_R", frequencies_R, persistent=False)
 
     def forward(
         self,
@@ -106,9 +126,13 @@ class SinusoidalPositionEncoding(nn.Module):
         device: torch.device,
         dtype: torch.dtype,
     ) -> Tensor:
-        positions = torch.arange(length, device=device, dtype=torch.float32)
-        angles = positions.unsqueeze(-1) * self.frequencies
-        return torch.stack((angles.sin(), angles.cos()), dim=-1).flatten(-2).to(dtype)
+        positions_L = torch.arange(length, device=device, dtype=torch.float32)
+        angles_LR = positions_L.unsqueeze(-1) * self.frequencies_R
+        signal_LD = torch.stack(
+            (angles_LR.sin(), angles_LR.cos()),
+            dim=-1,
+        ).flatten(-2)
+        return signal_LD.to(dtype)
 
 
 class MultiHeadAttention(nn.Module):
@@ -126,40 +150,43 @@ class MultiHeadAttention(nn.Module):
 
     def forward(
         self,
-        query_state: Tensor,
-        memory_state: Tensor,
-        attention_mask: Tensor,
+        query_state_BLD: Tensor,
+        memory_state_BMD: Tensor,
+        attention_mask_BLM: Tensor,
     ) -> Tensor:
-        batch_size, query_length, _ = query_state.shape
-        memory_length = memory_state.shape[1]
-        if attention_mask.shape != (batch_size, query_length, memory_length):
+        batch_size, query_length, _ = query_state_BLD.shape
+        memory_length = memory_state_BMD.shape[1]
+        if attention_mask_BLM.shape != (batch_size, query_length, memory_length):
             raise ValueError(
                 "attention_mask must have shape (batch, query_length, memory_length)"
             )
 
-        query = self._split_heads(self.query(query_state))
-        key = self._split_heads(self.key(memory_state))
-        value = self._split_heads(self.value(memory_state))
-        attended = F.scaled_dot_product_attention(
-            query,
-            key,
-            value,
-            attn_mask=attention_mask[:, None, :, :].to(
-                device=query_state.device,
+        query_BHLK = self._split_heads(self.query(query_state_BLD))
+        key_BHMK = self._split_heads(self.key(memory_state_BMD))
+        value_BHMK = self._split_heads(self.value(memory_state_BMD))
+        attended_BHLK = F.scaled_dot_product_attention(
+            query_BHLK,
+            key_BHMK,
+            value_BHMK,
+            attn_mask=attention_mask_BLM[:, None, :, :].to(
+                device=query_state_BLD.device,
                 dtype=torch.bool,
             ),
             dropout_p=self.attention_dropout if self.training else 0.0,
         )
-        attended = (
-            attended.transpose(1, 2)
+        attended_BLD = (
+            attended_BHLK.transpose(1, 2)
             .contiguous()
             .view(batch_size, query_length, self.hidden_size)
         )
-        return self.output(attended)
+        output_BLD = self.output(attended_BLD)
+        return output_BLD
 
-    def _split_heads(self, state: Tensor) -> Tensor:
-        batch_size, length, _ = state.shape
-        return state.view(batch_size, length, self.num_heads, -1).transpose(1, 2)
+    def _split_heads(self, state_BLD: Tensor) -> Tensor:
+        batch_size, length, _ = state_BLD.shape
+        state_BLHK = state_BLD.view(batch_size, length, self.num_heads, -1)
+        state_BHLK = state_BLHK.transpose(1, 2)
+        return state_BHLK
 
 
 class SeparableConvolution(nn.Module):
@@ -186,12 +213,13 @@ class SeparableConvolution(nn.Module):
         )
         self.pointwise = nn.Conv1d(input_size, output_size, 1)
 
-    def forward(self, state: Tensor) -> Tensor:
-        state = state.transpose(1, 2)
+    def forward(self, state_BLC: Tensor) -> Tensor:
+        state_BCL = state_BLC.transpose(1, 2)
         if self.left_padding:
-            state = F.pad(state, (self.left_padding, 0))
-        state = self.pointwise(self.depthwise(state))
-        return state.transpose(1, 2)
+            state_BCL = F.pad(state_BCL, (self.left_padding, 0))
+        state_BOL = self.pointwise(self.depthwise(state_BCL))
+        state_BLO = state_BOL.transpose(1, 2)
+        return state_BLO
 
 
 class ConvolutionalTransition(nn.Module):
@@ -218,11 +246,12 @@ class ConvolutionalTransition(nn.Module):
         )
         self.dropout = nn.Dropout(config.transition_dropout)
 
-    def forward(self, state: Tensor, token_mask: Tensor) -> Tensor:
-        state = state.masked_fill(~token_mask[:, :, None], 0.0)
-        state = self.dropout(F.relu(self.first(state)))
-        state = state.masked_fill(~token_mask[:, :, None], 0.0)
-        return self.second(state)
+    def forward(self, state_BLD: Tensor, token_mask_BL: Tensor) -> Tensor:
+        state_BLD = state_BLD.masked_fill(~token_mask_BL[:, :, None], 0.0)
+        hidden_BLF = self.dropout(F.relu(self.first(state_BLD)))
+        hidden_BLF = hidden_BLF.masked_fill(~token_mask_BL[:, :, None], 0.0)
+        output_BLD = self.second(hidden_BLF)
+        return output_BLD
 
 
 class UniversalTransformerEncoderBlock(nn.Module):
@@ -244,16 +273,23 @@ class UniversalTransformerEncoderBlock(nn.Module):
 
     def forward(
         self,
-        state: Tensor,
-        token_mask: Tensor,
-        self_attention_mask: Tensor,
+        state_BLD: Tensor,
+        token_mask_BL: Tensor,
+        self_attention_mask_BLL: Tensor,
     ) -> Tensor:
-        normalized = self.self_attention_norm(state)
-        attended = self.self_attention(normalized, normalized, self_attention_mask)
-        state = state + self.residual_dropout(attended)
-        transitioned = self.transition(self.transition_norm(state), token_mask)
-        state = state + self.residual_dropout(transitioned)
-        return state.masked_fill(~token_mask[:, :, None], 0.0)
+        normalized_BLD = self.self_attention_norm(state_BLD)
+        attended_BLD = self.self_attention(
+            normalized_BLD,
+            normalized_BLD,
+            self_attention_mask_BLL,
+        )
+        state_BLD = state_BLD + self.residual_dropout(attended_BLD)
+        transitioned_BLD = self.transition(
+            self.transition_norm(state_BLD),
+            token_mask_BL,
+        )
+        state_BLD = state_BLD + self.residual_dropout(transitioned_BLD)
+        return state_BLD.masked_fill(~token_mask_BL[:, :, None], 0.0)
 
 
 class UniversalTransformerDecoderBlock(nn.Module):
@@ -280,27 +316,34 @@ class UniversalTransformerDecoderBlock(nn.Module):
 
     def forward(
         self,
-        state: Tensor,
-        token_mask: Tensor,
-        self_attention_mask: Tensor,
-        encoder_state: Tensor,
-        cross_attention_mask: Tensor,
+        state_BLD: Tensor,
+        token_mask_BL: Tensor,
+        self_attention_mask_BLL: Tensor,
+        encoder_state_BMD: Tensor,
+        cross_attention_mask_BLM: Tensor,
     ) -> Tensor:
-        normalized = self.self_attention_norm(state)
-        attended = self.self_attention(normalized, normalized, self_attention_mask)
-        state = state + self.residual_dropout(attended)
-
-        normalized = self.cross_attention_norm(state)
-        attended = self.cross_attention(
-            normalized,
-            encoder_state,
-            cross_attention_mask,
+        normalized_BLD = self.self_attention_norm(state_BLD)
+        attended_BLD = self.self_attention(
+            normalized_BLD,
+            normalized_BLD,
+            self_attention_mask_BLL,
         )
-        state = state + self.residual_dropout(attended)
+        state_BLD = state_BLD + self.residual_dropout(attended_BLD)
 
-        transitioned = self.transition(self.transition_norm(state), token_mask)
-        state = state + self.residual_dropout(transitioned)
-        return state.masked_fill(~token_mask[:, :, None], 0.0)
+        normalized_BLD = self.cross_attention_norm(state_BLD)
+        attended_BLD = self.cross_attention(
+            normalized_BLD,
+            encoder_state_BMD,
+            cross_attention_mask_BLM,
+        )
+        state_BLD = state_BLD + self.residual_dropout(attended_BLD)
+
+        transitioned_BLD = self.transition(
+            self.transition_norm(state_BLD),
+            token_mask_BL,
+        )
+        state_BLD = state_BLD + self.residual_dropout(transitioned_BLD)
+        return state_BLD.masked_fill(~token_mask_BL[:, :, None], 0.0)
 
 
 class AdaptiveRecurrentStack(nn.Module):
@@ -325,71 +368,84 @@ class AdaptiveRecurrentStack(nn.Module):
 
     def forward(
         self,
-        state: Tensor,
-        token_mask: Tensor,
-        *block_arguments: Tensor,
+        state_BLD: Tensor,
+        token_mask_BL: Tensor,
+        *block_argument_tensors: Tensor,
     ) -> tuple[Tensor, dict[str, Tensor]]:
-        state = state.masked_fill(~token_mask[:, :, None], 0.0)
-        position_signal = self.position_encoding(
-            state.shape[1],
-            device=state.device,
-            dtype=state.dtype,
+        state_BLD = state_BLD.masked_fill(~token_mask_BL[:, :, None], 0.0)
+        position_signal_LD = self.position_encoding(
+            state_BLD.shape[1],
+            device=state_BLD.device,
+            dtype=state_BLD.dtype,
         )
-        halting_probability = (~token_mask).to(state.dtype)
-        remainders = state.new_zeros(token_mask.shape)
-        ponder_times = state.new_zeros(token_mask.shape)
-        weighted_state = torch.zeros_like(state)
+        halting_probability_BL = (~token_mask_BL).to(state_BLD.dtype)
+        remainders_BL = state_BLD.new_zeros(token_mask_BL.shape)
+        ponder_times_BL = state_BLD.new_zeros(token_mask_BL.shape)
+        weighted_state_BLD = torch.zeros_like(state_BLD)
         threshold = 1.0 - self.config.act_epsilon
         steps_executed = 0
 
         for step in range(self.config.act_max_steps):
-            running = (halting_probability < threshold) & token_mask
-            if not running.any().item():
+            running_BL = (halting_probability_BL < threshold) & token_mask_BL
+            if not running_BL.any().item():
                 break
             steps_executed += 1
 
-            step_signal = self.step_embedding.weight[step].to(state.dtype)
-            timed_state = state + position_signal[None, :, :] + step_signal
-            timed_state = timed_state.masked_fill(~token_mask[:, :, None], 0.0)
-            halting_scores = torch.sigmoid(
-                self.halting_projection(timed_state).squeeze(-1)
+            step_signal_D = self.step_embedding.weight[step].to(state_BLD.dtype)
+            timed_state_BLD = state_BLD + position_signal_LD[None, :, :] + step_signal_D
+            timed_state_BLD = timed_state_BLD.masked_fill(
+                ~token_mask_BL[:, :, None],
+                0.0,
             )
-            newly_halted = (
-                halting_probability + halting_scores * running > threshold
-            ) & running
-            continuing = (
-                halting_probability + halting_scores * running <= threshold
-            ) & running
-
-            halting_probability = halting_probability + halting_scores * continuing
-            step_remainders = newly_halted * (1.0 - halting_probability)
-            remainders = remainders + step_remainders
-            halting_probability = halting_probability + step_remainders
-            ponder_times = ponder_times + continuing + newly_halted
-            update_weights = (halting_scores * continuing + step_remainders).unsqueeze(
-                -1
+            halting_scores_BL = torch.sigmoid(
+                self.halting_projection(timed_state_BLD).squeeze(-1)
             )
+            newly_halted_BL = (
+                halting_probability_BL + halting_scores_BL * running_BL > threshold
+            ) & running_BL
+            continuing_BL = (
+                halting_probability_BL + halting_scores_BL * running_BL <= threshold
+            ) & running_BL
 
-            proposal = self.block(timed_state, token_mask, *block_arguments)
-            state = torch.where(running[:, :, None], proposal, state)
-            weighted_state = state * update_weights + weighted_state * (
-                1.0 - update_weights
+            halting_probability_BL = (
+                halting_probability_BL + halting_scores_BL * continuing_BL
             )
+            step_remainders_BL = newly_halted_BL * (1.0 - halting_probability_BL)
+            remainders_BL = remainders_BL + step_remainders_BL
+            halting_probability_BL = halting_probability_BL + step_remainders_BL
+            ponder_times_BL = ponder_times_BL + continuing_BL + newly_halted_BL
+            update_weights_BL = halting_scores_BL * continuing_BL + step_remainders_BL
 
-        valid_positions = token_mask.sum().clamp_min(1)
-        ponder_cost = ((ponder_times + remainders) * token_mask).sum() / valid_positions
+            proposal_BLD = self.block(
+                timed_state_BLD,
+                token_mask_BL,
+                *block_argument_tensors,
+            )
+            state_BLD = torch.where(
+                running_BL[:, :, None],
+                proposal_BLD,
+                state_BLD,
+            )
+            weighted_state_BLD = state_BLD * update_weights_BL[
+                :, :, None
+            ] + weighted_state_BLD * (1.0 - update_weights_BL[:, :, None])
+
+        valid_token_count = token_mask_BL.sum().clamp_min(1)
+        ponder_cost = (
+            (ponder_times_BL + remainders_BL) * token_mask_BL
+        ).sum() / valid_token_count
         statistics = {
-            "halting_probability": halting_probability,
-            "remainders": remainders,
-            "ponder_times": ponder_times,
+            "halting_probability_BL": halting_probability_BL,
+            "remainders_BL": remainders_BL,
+            "ponder_times_BL": ponder_times_BL,
             "ponder_cost": ponder_cost,
             "steps_executed": torch.tensor(
                 steps_executed,
-                device=state.device,
+                device=state_BLD.device,
                 dtype=torch.int64,
             ),
         }
-        return weighted_state, statistics
+        return weighted_state_BLD, statistics
 
 
 class UniversalTransformerEncoder(nn.Module):
@@ -415,20 +471,23 @@ class UniversalTransformerEncoder(nn.Module):
 
     def forward(
         self,
-        source_ids: Tensor,
-        source_mask: Tensor,
-        self_attention_mask: Tensor,
+        source_token_id_BS: Tensor,
+        source_validity_mask_BS: Tensor,
+        self_attention_mask_BSS: Tensor,
     ) -> tuple[Tensor, dict[str, Tensor]]:
-        state = self.embedding(source_ids) * math.sqrt(self.hidden_size)
-        state = self.embedding_dropout(state)
-        state, statistics = self.recurrent_stack(
-            state,
-            source_mask,
-            self_attention_mask,
+        state_BSD = self.embedding(source_token_id_BS) * math.sqrt(self.hidden_size)
+        state_BSD = self.embedding_dropout(state_BSD)
+        state_BSD, statistics = self.recurrent_stack(
+            state_BSD,
+            source_validity_mask_BS,
+            self_attention_mask_BSS,
         )
-        state = self.output_norm(state)
-        state = state.masked_fill(~source_mask[:, :, None], 0.0)
-        return state, statistics
+        state_BSD = self.output_norm(state_BSD)
+        state_BSD = state_BSD.masked_fill(
+            ~source_validity_mask_BS[:, :, None],
+            0.0,
+        )
+        return state_BSD, statistics
 
 
 class UniversalTransformerDecoder(nn.Module):
@@ -454,24 +513,29 @@ class UniversalTransformerDecoder(nn.Module):
 
     def forward(
         self,
-        decoder_input_ids: Tensor,
-        decoder_mask: Tensor,
-        self_attention_mask: Tensor,
-        encoder_state: Tensor,
-        cross_attention_mask: Tensor,
+        decoder_input_token_id_BT: Tensor,
+        decoder_validity_mask_BT: Tensor,
+        self_attention_mask_BTT: Tensor,
+        encoder_state_BSD: Tensor,
+        cross_attention_mask_BTS: Tensor,
     ) -> tuple[Tensor, dict[str, Tensor]]:
-        state = self.embedding(decoder_input_ids) * math.sqrt(self.hidden_size)
-        state = self.embedding_dropout(state)
-        state, statistics = self.recurrent_stack(
-            state,
-            decoder_mask,
-            self_attention_mask,
-            encoder_state,
-            cross_attention_mask,
+        state_BTD = self.embedding(decoder_input_token_id_BT) * math.sqrt(
+            self.hidden_size
         )
-        state = self.output_norm(state)
-        state = state.masked_fill(~decoder_mask[:, :, None], 0.0)
-        return state, statistics
+        state_BTD = self.embedding_dropout(state_BTD)
+        state_BTD, statistics = self.recurrent_stack(
+            state_BTD,
+            decoder_validity_mask_BT,
+            self_attention_mask_BTT,
+            encoder_state_BSD,
+            cross_attention_mask_BTS,
+        )
+        state_BTD = self.output_norm(state_BTD)
+        state_BTD = state_BTD.masked_fill(
+            ~decoder_validity_mask_BT[:, :, None],
+            0.0,
+        )
+        return state_BTD, statistics
 
 
 class UniversalTransformer(nn.Module):
@@ -514,83 +578,95 @@ class UniversalTransformer(nn.Module):
 
     def encode(
         self,
-        source_ids: Tensor,
+        source_token_id_BS: Tensor,
         *,
-        source_padding_mask: Tensor | None = None,
-        source_attention_mask: Tensor | None = None,
+        source_validity_mask_BS: Tensor | None = None,
+        source_attention_mask_BSS: Tensor | None = None,
     ) -> tuple[Tensor, dict[str, Tensor]]:
-        source_mask = self._token_mask(source_ids, source_padding_mask)
-        self_attention_mask = self._self_attention_mask(
-            source_mask,
-            causal=False,
-            supplied_mask=source_attention_mask,
+        source_validity_mask_BS = self._token_mask(
+            source_token_id_BS,
+            source_validity_mask_BS,
         )
-        return self.encoder(source_ids, source_mask, self_attention_mask)
+        self_attention_mask_BSS = self._self_attention_mask(
+            source_validity_mask_BS,
+            causal=False,
+            supplied_mask_BLL=source_attention_mask_BSS,
+        )
+        return self.encoder(
+            source_token_id_BS,
+            source_validity_mask_BS,
+            self_attention_mask_BSS,
+        )
 
     def decode(
         self,
-        decoder_input_ids: Tensor,
-        encoder_state: Tensor,
+        decoder_input_token_id_BT: Tensor,
+        encoder_state_BSD: Tensor,
         *,
-        source_padding_mask: Tensor | None = None,
-        decoder_padding_mask: Tensor | None = None,
-        decoder_attention_mask: Tensor | None = None,
-        cross_attention_mask: Tensor | None = None,
+        source_validity_mask_BS: Tensor | None = None,
+        decoder_validity_mask_BT: Tensor | None = None,
+        decoder_attention_mask_BTT: Tensor | None = None,
+        cross_attention_mask_BTS: Tensor | None = None,
     ) -> tuple[Tensor, dict[str, Tensor]]:
-        batch_size, source_length, _ = encoder_state.shape
-        if decoder_input_ids.shape[0] != batch_size:
+        batch_size, source_length, _ = encoder_state_BSD.shape
+        if decoder_input_token_id_BT.shape[0] != batch_size:
             raise ValueError("source and decoder batch sizes must match")
-        source_mask = self._state_mask(
+        source_validity_mask_BS = self._state_mask(
             batch_size,
             source_length,
-            encoder_state.device,
-            source_padding_mask,
+            encoder_state_BSD.device,
+            source_validity_mask_BS,
         )
-        decoder_mask = self._token_mask(decoder_input_ids, decoder_padding_mask)
-        self_attention_mask = self._self_attention_mask(
-            decoder_mask,
+        decoder_validity_mask_BT = self._token_mask(
+            decoder_input_token_id_BT,
+            decoder_validity_mask_BT,
+        )
+        self_attention_mask_BTT = self._self_attention_mask(
+            decoder_validity_mask_BT,
             causal=True,
-            supplied_mask=decoder_attention_mask,
+            supplied_mask_BLL=decoder_attention_mask_BTT,
         )
-        encoder_decoder_mask = decoder_mask[:, :, None] & source_mask[:, None, :]
-        encoder_decoder_mask = self._merge_attention_mask(
-            encoder_decoder_mask,
-            cross_attention_mask,
+        base_cross_attention_mask_BTS = (
+            decoder_validity_mask_BT[:, :, None] & source_validity_mask_BS[:, None, :]
+        )
+        cross_attention_mask_BTS = self._merge_attention_mask(
+            base_cross_attention_mask_BTS,
+            supplied_mask_BLM=cross_attention_mask_BTS,
         )
         return self.decoder(
-            decoder_input_ids,
-            decoder_mask,
-            self_attention_mask,
-            encoder_state,
-            encoder_decoder_mask,
+            decoder_input_token_id_BT,
+            decoder_validity_mask_BT,
+            self_attention_mask_BTT,
+            encoder_state_BSD,
+            cross_attention_mask_BTS,
         )
 
     def forward(
         self,
-        source_ids: Tensor,
-        decoder_input_ids: Tensor,
+        source_token_id_BS: Tensor,
+        decoder_input_token_id_BT: Tensor,
         *,
-        source_padding_mask: Tensor | None = None,
-        decoder_padding_mask: Tensor | None = None,
-        source_attention_mask: Tensor | None = None,
-        decoder_attention_mask: Tensor | None = None,
-        cross_attention_mask: Tensor | None = None,
+        source_validity_mask_BS: Tensor | None = None,
+        decoder_validity_mask_BT: Tensor | None = None,
+        source_attention_mask_BSS: Tensor | None = None,
+        decoder_attention_mask_BTT: Tensor | None = None,
+        cross_attention_mask_BTS: Tensor | None = None,
     ) -> tuple[Tensor, dict[str, object]]:
         """Return target logits for already-right-shifted decoder inputs."""
-        encoder_state, encoder_statistics = self.encode(
-            source_ids,
-            source_padding_mask=source_padding_mask,
-            source_attention_mask=source_attention_mask,
+        encoder_state_BSD, encoder_statistics = self.encode(
+            source_token_id_BS,
+            source_validity_mask_BS=source_validity_mask_BS,
+            source_attention_mask_BSS=source_attention_mask_BSS,
         )
-        decoder_state, decoder_statistics = self.decode(
-            decoder_input_ids,
-            encoder_state,
-            source_padding_mask=source_padding_mask,
-            decoder_padding_mask=decoder_padding_mask,
-            decoder_attention_mask=decoder_attention_mask,
-            cross_attention_mask=cross_attention_mask,
+        decoder_state_BTD, decoder_statistics = self.decode(
+            decoder_input_token_id_BT,
+            encoder_state_BSD,
+            source_validity_mask_BS=source_validity_mask_BS,
+            decoder_validity_mask_BT=decoder_validity_mask_BT,
+            decoder_attention_mask_BTT=decoder_attention_mask_BTT,
+            cross_attention_mask_BTS=cross_attention_mask_BTS,
         )
-        logits = self.output_projection(decoder_state)
+        logits_BTV = self.output_projection(decoder_state_BTD)
         act_loss = self.config.act_loss_weight * (
             encoder_statistics["ponder_cost"] + decoder_statistics["ponder_cost"]
         )
@@ -599,20 +675,20 @@ class UniversalTransformer(nn.Module):
             "decoder": decoder_statistics,
             "act_loss": act_loss,
         }
-        return logits, auxiliary
+        return logits_BTV, auxiliary
 
     def compute_loss(
         self,
-        logits: Tensor,
-        labels: Tensor,
+        logits_BTV: Tensor,
+        labels_BT: Tensor,
         auxiliary: dict[str, object],
         *,
         ignore_index: int = -100,
     ) -> Tensor:
         """Combine autoregressive cross-entropy with the ACT ponder penalty."""
         prediction_loss = F.cross_entropy(
-            logits.flatten(0, 1),
-            labels.flatten(),
+            logits_BTV.flatten(0, 1),
+            labels_BT.flatten(),
             ignore_index=ignore_index,
         )
         act_loss = auxiliary["act_loss"]
@@ -623,58 +699,68 @@ class UniversalTransformer(nn.Module):
     @torch.no_grad()
     def generate(
         self,
-        source_ids: Tensor,
+        source_token_id_BS: Tensor,
         *,
         bos_token_id: int,
         eos_token_id: int,
         max_new_tokens: int,
-        source_padding_mask: Tensor | None = None,
-        source_attention_mask: Tensor | None = None,
+        source_validity_mask_BS: Tensor | None = None,
+        source_attention_mask_BSS: Tensor | None = None,
     ) -> Tensor:
         """Greedily decode one target token at a time without a decoder cache."""
         if max_new_tokens < 1:
             raise ValueError("max_new_tokens must be positive")
-        encoder_state, _ = self.encode(
-            source_ids,
-            source_padding_mask=source_padding_mask,
-            source_attention_mask=source_attention_mask,
+        encoder_state_BSD, _ = self.encode(
+            source_token_id_BS,
+            source_validity_mask_BS=source_validity_mask_BS,
+            source_attention_mask_BSS=source_attention_mask_BSS,
         )
-        generated = torch.full(
-            (source_ids.shape[0], 1),
+        generated_token_id_BT = torch.full(
+            (source_token_id_BS.shape[0], 1),
             bos_token_id,
-            device=source_ids.device,
+            device=source_token_id_BS.device,
             dtype=torch.long,
         )
-        finished = torch.zeros(
-            source_ids.shape[0], device=source_ids.device, dtype=torch.bool
+        finished_B = torch.zeros(
+            source_token_id_BS.shape[0],
+            device=source_token_id_BS.device,
+            dtype=torch.bool,
         )
         for _ in range(max_new_tokens):
-            decoder_state, _ = self.decode(
-                generated,
-                encoder_state,
-                source_padding_mask=source_padding_mask,
+            decoder_state_BTD, _ = self.decode(
+                generated_token_id_BT,
+                encoder_state_BSD,
+                source_validity_mask_BS=source_validity_mask_BS,
             )
-            next_token = self.output_projection(decoder_state[:, -1]).argmax(dim=-1)
-            next_token = torch.where(
-                finished,
-                torch.full_like(next_token, eos_token_id),
-                next_token,
+            next_token_id_B = self.output_projection(decoder_state_BTD[:, -1]).argmax(
+                dim=-1
             )
-            generated = torch.cat((generated, next_token[:, None]), dim=1)
-            finished = finished | (next_token == eos_token_id)
-            if finished.all().item():
+            next_token_id_B = torch.where(
+                finished_B,
+                torch.full_like(next_token_id_B, eos_token_id),
+                next_token_id_B,
+            )
+            generated_token_id_BT = torch.cat(
+                (generated_token_id_BT, next_token_id_B[:, None]),
+                dim=1,
+            )
+            finished_B = finished_B | (next_token_id_B == eos_token_id)
+            if finished_B.all().item():
                 break
-        return generated
+        return generated_token_id_BT
 
     @staticmethod
-    def _token_mask(token_ids: Tensor, padding_mask: Tensor | None) -> Tensor:
-        if token_ids.ndim != 2:
+    def _token_mask(
+        token_id_BL: Tensor,
+        validity_mask_BL: Tensor | None,
+    ) -> Tensor:
+        if token_id_BL.ndim != 2:
             raise ValueError("token IDs must have shape (batch, length)")
         return UniversalTransformer._state_mask(
-            token_ids.shape[0],
-            token_ids.shape[1],
-            token_ids.device,
-            padding_mask,
+            token_id_BL.shape[0],
+            token_id_BL.shape[1],
+            token_id_BL.device,
+            validity_mask_BL,
         )
 
     @staticmethod
@@ -682,42 +768,49 @@ class UniversalTransformer(nn.Module):
         batch_size: int,
         length: int,
         device: torch.device,
-        padding_mask: Tensor | None,
+        validity_mask_BL: Tensor | None,
     ) -> Tensor:
-        if padding_mask is None:
+        if validity_mask_BL is None:
             return torch.ones((batch_size, length), device=device, dtype=torch.bool)
-        if padding_mask.shape != (batch_size, length):
-            raise ValueError("padding masks must have shape (batch, length)")
-        return padding_mask.to(device=device, dtype=torch.bool)
+        if validity_mask_BL.shape != (batch_size, length):
+            raise ValueError("validity masks must have shape (batch, length)")
+        return validity_mask_BL.to(device=device, dtype=torch.bool)
 
     @staticmethod
     def _self_attention_mask(
-        token_mask: Tensor,
+        token_validity_mask_BL: Tensor,
         *,
         causal: bool,
-        supplied_mask: Tensor | None,
+        supplied_mask_BLL: Tensor | None,
     ) -> Tensor:
-        length = token_mask.shape[1]
-        attention_mask = token_mask[:, :, None] & token_mask[:, None, :]
+        length = token_validity_mask_BL.shape[1]
+        attention_mask_BLL = (
+            token_validity_mask_BL[:, :, None] & token_validity_mask_BL[:, None, :]
+        )
         if causal:
-            causal_mask = torch.ones(
+            causal_mask_LL = torch.ones(
                 (length, length),
-                device=token_mask.device,
+                device=token_validity_mask_BL.device,
                 dtype=torch.bool,
             ).tril()
-            attention_mask = attention_mask & causal_mask[None, :, :]
+            attention_mask_BLL = attention_mask_BLL & causal_mask_LL[None, :, :]
         return UniversalTransformer._merge_attention_mask(
-            attention_mask,
-            supplied_mask,
+            attention_mask_BLL,
+            supplied_mask_BLM=supplied_mask_BLL,
         )
 
     @staticmethod
     def _merge_attention_mask(
-        base_mask: Tensor,
-        supplied_mask: Tensor | None,
+        base_mask_BLM: Tensor,
+        supplied_mask_BLM: Tensor | None,
     ) -> Tensor:
-        if supplied_mask is None:
-            return base_mask
-        if supplied_mask.shape != base_mask.shape:
-            raise ValueError(f"attention mask must have shape {tuple(base_mask.shape)}")
-        return base_mask & supplied_mask.to(device=base_mask.device, dtype=torch.bool)
+        if supplied_mask_BLM is None:
+            return base_mask_BLM
+        if supplied_mask_BLM.shape != base_mask_BLM.shape:
+            raise ValueError(
+                f"attention mask must have shape {tuple(base_mask_BLM.shape)}"
+            )
+        return base_mask_BLM & supplied_mask_BLM.to(
+            device=base_mask_BLM.device,
+            dtype=torch.bool,
+        )
