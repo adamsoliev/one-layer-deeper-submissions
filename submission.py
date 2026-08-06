@@ -372,12 +372,22 @@ class AdaptiveRecurrentStack(nn.Module):
         nonpadding_mask_BL: Tensor,
         *block_argument_tensors: Tensor,
     ) -> tuple[Tensor, dict[str, Tensor]]:
+        """Encode source tokens into contextual representations.
+
+        IN: state, non-padding mask and *
+        self-attention mask for encoder
+        self-attention mask, encoder state, and cross-attention mask for decoder
+
+        OUT: contextual source states [B, S, D] and ACT statistics.
+        """
         state_BLD = state_BLD.masked_fill(~nonpadding_mask_BL[:, :, None], 0.0)
         position_signal_LD = self.position_encoding(
             state_BLD.shape[1],
             device=state_BLD.device,
             dtype=state_BLD.dtype,
         )
+        # initialize accumulators
+        # padding tokens halted (1), others continuing (0)
         halting_probability_BL = (~nonpadding_mask_BL).to(state_BLD.dtype)
         remainders_BL = state_BLD.new_zeros(nonpadding_mask_BL.shape)
         ponder_times_BL = state_BLD.new_zeros(nonpadding_mask_BL.shape)
@@ -386,8 +396,10 @@ class AdaptiveRecurrentStack(nn.Module):
         steps_executed = 0
 
         for step in range(self.config.act_max_steps):
-            running_BL = (halting_probability_BL < threshold) & nonpadding_mask_BL
-            if not running_BL.any().item():
+            active_token_mask_BL = (
+                halting_probability_BL < threshold
+            ) & nonpadding_mask_BL
+            if not active_token_mask_BL.any().item():
                 break
             steps_executed += 1
 
@@ -397,24 +409,33 @@ class AdaptiveRecurrentStack(nn.Module):
                 ~nonpadding_mask_BL[:, :, None],
                 0.0,
             )
+            # timed state now has token’s previous-step representation, its position signal, and its recurrent step signal
+            # learned projection uses this current representation to decide halting
             halting_scores_BL = torch.sigmoid(
                 self.halting_projection(timed_state_BLD).squeeze(-1)
             )
-            newly_halted_BL = (
-                halting_probability_BL + halting_scores_BL * running_BL > threshold
-            ) & running_BL
-            continuing_BL = (
-                halting_probability_BL + halting_scores_BL * running_BL <= threshold
-            ) & running_BL
+            active_score_BL = halting_scores_BL * active_token_mask_BL
+            candidate_probability_BL = halting_probability_BL + active_score_BL
+            newly_halted_mask_BL = (
+                candidate_probability_BL > threshold
+            ) & active_token_mask_BL
+            continuing_mask_BL = (
+                candidate_probability_BL <= threshold
+            ) & active_token_mask_BL
 
             halting_probability_BL = (
-                halting_probability_BL + halting_scores_BL * continuing_BL
+                halting_probability_BL + halting_scores_BL * continuing_mask_BL
             )
-            step_remainders_BL = newly_halted_BL * (1.0 - halting_probability_BL)
+            step_remainders_BL = newly_halted_mask_BL * (1.0 - halting_probability_BL)
             remainders_BL = remainders_BL + step_remainders_BL
+            # ensures 1 for each halted token
             halting_probability_BL = halting_probability_BL + step_remainders_BL
-            ponder_times_BL = ponder_times_BL + continuing_BL + newly_halted_BL
-            update_weights_BL = halting_scores_BL * continuing_BL + step_remainders_BL
+            ponder_times_BL = (
+                ponder_times_BL + continuing_mask_BL + newly_halted_mask_BL
+            )
+            update_weights_BL = (
+                halting_scores_BL * continuing_mask_BL + step_remainders_BL
+            )
 
             proposal_BLD = self.block(
                 timed_state_BLD,
@@ -422,7 +443,7 @@ class AdaptiveRecurrentStack(nn.Module):
                 *block_argument_tensors,
             )
             state_BLD = torch.where(
-                running_BL[:, :, None],
+                active_token_mask_BL[:, :, None],
                 proposal_BLD,
                 state_BLD,
             )
