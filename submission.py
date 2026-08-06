@@ -475,14 +475,29 @@ class UniversalTransformerEncoder(nn.Module):
         source_nonpadding_mask_BS: Tensor,
         self_attention_mask_BSS: Tensor,
     ) -> tuple[Tensor, dict[str, Tensor]]:
+        """Encode source tokens into contextual representations.
+
+        IN: source token IDs [B, S], non-padding mask [B, S], and
+        self-attention mask [B, S, S].
+
+        OUT: contextual source states [B, S, D] and ACT statistics.
+        """
+        # Embeddings are initialized with std D^(-1/2); scaling by sqrt(D)
+        # gives the looked-up vectors unit standard deviation.
         state_BSD = self.embedding(source_token_id_BS) * math.sqrt(self.hidden_size)
         state_BSD = self.embedding_dropout(state_BSD)
+
+        # Recurrently apply the shared encoder block with per-position ACT halting.
         state_BSD, statistics = self.recurrent_stack(
             state_BSD,
             source_nonpadding_mask_BS,
             self_attention_mask_BSS,
         )
+
+        # Normalize the final state after the recurrent residual updates.
         state_BSD = self.output_norm(state_BSD)
+
+        # LayerNorm's learned bias can make padded states nonzero; zero them again.
         state_BSD = state_BSD.masked_fill(
             ~source_nonpadding_mask_BS[:, :, None],
             0.0,
