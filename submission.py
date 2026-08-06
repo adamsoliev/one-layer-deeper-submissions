@@ -246,10 +246,10 @@ class ConvolutionalTransition(nn.Module):
         )
         self.dropout = nn.Dropout(config.transition_dropout)
 
-    def forward(self, state_BLD: Tensor, token_mask_BL: Tensor) -> Tensor:
-        state_BLD = state_BLD.masked_fill(~token_mask_BL[:, :, None], 0.0)
+    def forward(self, state_BLD: Tensor, nonpadding_mask_BL: Tensor) -> Tensor:
+        state_BLD = state_BLD.masked_fill(~nonpadding_mask_BL[:, :, None], 0.0)
         hidden_BLF = self.dropout(F.relu(self.first(state_BLD)))
-        hidden_BLF = hidden_BLF.masked_fill(~token_mask_BL[:, :, None], 0.0)
+        hidden_BLF = hidden_BLF.masked_fill(~nonpadding_mask_BL[:, :, None], 0.0)
         output_BLD = self.second(hidden_BLF)
         return output_BLD
 
@@ -274,7 +274,7 @@ class UniversalTransformerEncoderBlock(nn.Module):
     def forward(
         self,
         state_BLD: Tensor,
-        token_mask_BL: Tensor,
+        nonpadding_mask_BL: Tensor,
         self_attention_mask_BLL: Tensor,
     ) -> Tensor:
         normalized_BLD = self.self_attention_norm(state_BLD)
@@ -286,10 +286,10 @@ class UniversalTransformerEncoderBlock(nn.Module):
         state_BLD = state_BLD + self.residual_dropout(attended_BLD)
         transitioned_BLD = self.transition(
             self.transition_norm(state_BLD),
-            token_mask_BL,
+            nonpadding_mask_BL,
         )
         state_BLD = state_BLD + self.residual_dropout(transitioned_BLD)
-        return state_BLD.masked_fill(~token_mask_BL[:, :, None], 0.0)
+        return state_BLD.masked_fill(~nonpadding_mask_BL[:, :, None], 0.0)
 
 
 class UniversalTransformerDecoderBlock(nn.Module):
@@ -317,7 +317,7 @@ class UniversalTransformerDecoderBlock(nn.Module):
     def forward(
         self,
         state_BLD: Tensor,
-        token_mask_BL: Tensor,
+        nonpadding_mask_BL: Tensor,
         self_attention_mask_BLL: Tensor,
         encoder_state_BMD: Tensor,
         cross_attention_mask_BLM: Tensor,
@@ -340,10 +340,10 @@ class UniversalTransformerDecoderBlock(nn.Module):
 
         transitioned_BLD = self.transition(
             self.transition_norm(state_BLD),
-            token_mask_BL,
+            nonpadding_mask_BL,
         )
         state_BLD = state_BLD + self.residual_dropout(transitioned_BLD)
-        return state_BLD.masked_fill(~token_mask_BL[:, :, None], 0.0)
+        return state_BLD.masked_fill(~nonpadding_mask_BL[:, :, None], 0.0)
 
 
 class AdaptiveRecurrentStack(nn.Module):
@@ -369,24 +369,24 @@ class AdaptiveRecurrentStack(nn.Module):
     def forward(
         self,
         state_BLD: Tensor,
-        token_mask_BL: Tensor,
+        nonpadding_mask_BL: Tensor,
         *block_argument_tensors: Tensor,
     ) -> tuple[Tensor, dict[str, Tensor]]:
-        state_BLD = state_BLD.masked_fill(~token_mask_BL[:, :, None], 0.0)
+        state_BLD = state_BLD.masked_fill(~nonpadding_mask_BL[:, :, None], 0.0)
         position_signal_LD = self.position_encoding(
             state_BLD.shape[1],
             device=state_BLD.device,
             dtype=state_BLD.dtype,
         )
-        halting_probability_BL = (~token_mask_BL).to(state_BLD.dtype)
-        remainders_BL = state_BLD.new_zeros(token_mask_BL.shape)
-        ponder_times_BL = state_BLD.new_zeros(token_mask_BL.shape)
+        halting_probability_BL = (~nonpadding_mask_BL).to(state_BLD.dtype)
+        remainders_BL = state_BLD.new_zeros(nonpadding_mask_BL.shape)
+        ponder_times_BL = state_BLD.new_zeros(nonpadding_mask_BL.shape)
         weighted_state_BLD = torch.zeros_like(state_BLD)
         threshold = 1.0 - self.config.act_epsilon
         steps_executed = 0
 
         for step in range(self.config.act_max_steps):
-            running_BL = (halting_probability_BL < threshold) & token_mask_BL
+            running_BL = (halting_probability_BL < threshold) & nonpadding_mask_BL
             if not running_BL.any().item():
                 break
             steps_executed += 1
@@ -394,7 +394,7 @@ class AdaptiveRecurrentStack(nn.Module):
             step_signal_D = self.step_embedding.weight[step].to(state_BLD.dtype)
             timed_state_BLD = state_BLD + position_signal_LD[None, :, :] + step_signal_D
             timed_state_BLD = timed_state_BLD.masked_fill(
-                ~token_mask_BL[:, :, None],
+                ~nonpadding_mask_BL[:, :, None],
                 0.0,
             )
             halting_scores_BL = torch.sigmoid(
@@ -418,7 +418,7 @@ class AdaptiveRecurrentStack(nn.Module):
 
             proposal_BLD = self.block(
                 timed_state_BLD,
-                token_mask_BL,
+                nonpadding_mask_BL,
                 *block_argument_tensors,
             )
             state_BLD = torch.where(
@@ -430,10 +430,10 @@ class AdaptiveRecurrentStack(nn.Module):
                 :, :, None
             ] + weighted_state_BLD * (1.0 - update_weights_BL[:, :, None])
 
-        valid_token_count = token_mask_BL.sum().clamp_min(1)
+        nonpadding_token_count = nonpadding_mask_BL.sum().clamp_min(1)
         ponder_cost = (
-            (ponder_times_BL + remainders_BL) * token_mask_BL
-        ).sum() / valid_token_count
+            (ponder_times_BL + remainders_BL) * nonpadding_mask_BL
+        ).sum() / nonpadding_token_count
         statistics = {
             "halting_probability_BL": halting_probability_BL,
             "remainders_BL": remainders_BL,
@@ -472,19 +472,19 @@ class UniversalTransformerEncoder(nn.Module):
     def forward(
         self,
         source_token_id_BS: Tensor,
-        source_validity_mask_BS: Tensor,
+        source_nonpadding_mask_BS: Tensor,
         self_attention_mask_BSS: Tensor,
     ) -> tuple[Tensor, dict[str, Tensor]]:
         state_BSD = self.embedding(source_token_id_BS) * math.sqrt(self.hidden_size)
         state_BSD = self.embedding_dropout(state_BSD)
         state_BSD, statistics = self.recurrent_stack(
             state_BSD,
-            source_validity_mask_BS,
+            source_nonpadding_mask_BS,
             self_attention_mask_BSS,
         )
         state_BSD = self.output_norm(state_BSD)
         state_BSD = state_BSD.masked_fill(
-            ~source_validity_mask_BS[:, :, None],
+            ~source_nonpadding_mask_BS[:, :, None],
             0.0,
         )
         return state_BSD, statistics
@@ -514,7 +514,7 @@ class UniversalTransformerDecoder(nn.Module):
     def forward(
         self,
         decoder_input_token_id_BT: Tensor,
-        decoder_validity_mask_BT: Tensor,
+        decoder_nonpadding_mask_BT: Tensor,
         self_attention_mask_BTT: Tensor,
         encoder_state_BSD: Tensor,
         cross_attention_mask_BTS: Tensor,
@@ -525,14 +525,14 @@ class UniversalTransformerDecoder(nn.Module):
         state_BTD = self.embedding_dropout(state_BTD)
         state_BTD, statistics = self.recurrent_stack(
             state_BTD,
-            decoder_validity_mask_BT,
+            decoder_nonpadding_mask_BT,
             self_attention_mask_BTT,
             encoder_state_BSD,
             cross_attention_mask_BTS,
         )
         state_BTD = self.output_norm(state_BTD)
         state_BTD = state_BTD.masked_fill(
-            ~decoder_validity_mask_BT[:, :, None],
+            ~decoder_nonpadding_mask_BT[:, :, None],
             0.0,
         )
         return state_BTD, statistics
@@ -580,21 +580,21 @@ class UniversalTransformer(nn.Module):
         self,
         source_token_id_BS: Tensor,
         *,
-        source_validity_mask_BS: Tensor | None = None,
+        source_nonpadding_mask_BS: Tensor | None = None,
         source_attention_mask_BSS: Tensor | None = None,
     ) -> tuple[Tensor, dict[str, Tensor]]:
-        source_validity_mask_BS = self._token_mask(
+        source_nonpadding_mask_BS = self._nonpadding_mask(
             source_token_id_BS,
-            source_validity_mask_BS,
+            source_nonpadding_mask_BS,
         )
         self_attention_mask_BSS = self._self_attention_mask(
-            source_validity_mask_BS,
+            source_nonpadding_mask_BS,
             causal=False,
             supplied_mask_BLL=source_attention_mask_BSS,
         )
         return self.encoder(
             source_token_id_BS,
-            source_validity_mask_BS,
+            source_nonpadding_mask_BS,
             self_attention_mask_BSS,
         )
 
@@ -603,31 +603,32 @@ class UniversalTransformer(nn.Module):
         decoder_input_token_id_BT: Tensor,
         encoder_state_BSD: Tensor,
         *,
-        source_validity_mask_BS: Tensor | None = None,
-        decoder_validity_mask_BT: Tensor | None = None,
+        source_nonpadding_mask_BS: Tensor | None = None,
+        decoder_nonpadding_mask_BT: Tensor | None = None,
         decoder_attention_mask_BTT: Tensor | None = None,
         cross_attention_mask_BTS: Tensor | None = None,
     ) -> tuple[Tensor, dict[str, Tensor]]:
         batch_size, source_length, _ = encoder_state_BSD.shape
         if decoder_input_token_id_BT.shape[0] != batch_size:
             raise ValueError("source and decoder batch sizes must match")
-        source_validity_mask_BS = self._state_mask(
+        source_nonpadding_mask_BS = self._state_nonpadding_mask(
             batch_size,
             source_length,
             encoder_state_BSD.device,
-            source_validity_mask_BS,
+            source_nonpadding_mask_BS,
         )
-        decoder_validity_mask_BT = self._token_mask(
+        decoder_nonpadding_mask_BT = self._nonpadding_mask(
             decoder_input_token_id_BT,
-            decoder_validity_mask_BT,
+            decoder_nonpadding_mask_BT,
         )
         self_attention_mask_BTT = self._self_attention_mask(
-            decoder_validity_mask_BT,
+            decoder_nonpadding_mask_BT,
             causal=True,
             supplied_mask_BLL=decoder_attention_mask_BTT,
         )
         base_cross_attention_mask_BTS = (
-            decoder_validity_mask_BT[:, :, None] & source_validity_mask_BS[:, None, :]
+            decoder_nonpadding_mask_BT[:, :, None]
+            & source_nonpadding_mask_BS[:, None, :]
         )
         cross_attention_mask_BTS = self._merge_attention_mask(
             base_cross_attention_mask_BTS,
@@ -635,7 +636,7 @@ class UniversalTransformer(nn.Module):
         )
         return self.decoder(
             decoder_input_token_id_BT,
-            decoder_validity_mask_BT,
+            decoder_nonpadding_mask_BT,
             self_attention_mask_BTT,
             encoder_state_BSD,
             cross_attention_mask_BTS,
@@ -646,8 +647,8 @@ class UniversalTransformer(nn.Module):
         source_token_id_BS: Tensor,
         decoder_input_token_id_BT: Tensor,
         *,
-        source_validity_mask_BS: Tensor | None = None,
-        decoder_validity_mask_BT: Tensor | None = None,
+        source_nonpadding_mask_BS: Tensor | None = None,
+        decoder_nonpadding_mask_BT: Tensor | None = None,
         source_attention_mask_BSS: Tensor | None = None,
         decoder_attention_mask_BTT: Tensor | None = None,
         cross_attention_mask_BTS: Tensor | None = None,
@@ -655,14 +656,14 @@ class UniversalTransformer(nn.Module):
         """Return target logits for already-right-shifted decoder inputs."""
         encoder_state_BSD, encoder_statistics = self.encode(
             source_token_id_BS,
-            source_validity_mask_BS=source_validity_mask_BS,
+            source_nonpadding_mask_BS=source_nonpadding_mask_BS,
             source_attention_mask_BSS=source_attention_mask_BSS,
         )
         decoder_state_BTD, decoder_statistics = self.decode(
             decoder_input_token_id_BT,
             encoder_state_BSD,
-            source_validity_mask_BS=source_validity_mask_BS,
-            decoder_validity_mask_BT=decoder_validity_mask_BT,
+            source_nonpadding_mask_BS=source_nonpadding_mask_BS,
+            decoder_nonpadding_mask_BT=decoder_nonpadding_mask_BT,
             decoder_attention_mask_BTT=decoder_attention_mask_BTT,
             cross_attention_mask_BTS=cross_attention_mask_BTS,
         )
@@ -704,7 +705,7 @@ class UniversalTransformer(nn.Module):
         bos_token_id: int,
         eos_token_id: int,
         max_new_tokens: int,
-        source_validity_mask_BS: Tensor | None = None,
+        source_nonpadding_mask_BS: Tensor | None = None,
         source_attention_mask_BSS: Tensor | None = None,
     ) -> Tensor:
         """Greedily decode one target token at a time without a decoder cache."""
@@ -712,7 +713,7 @@ class UniversalTransformer(nn.Module):
             raise ValueError("max_new_tokens must be positive")
         encoder_state_BSD, _ = self.encode(
             source_token_id_BS,
-            source_validity_mask_BS=source_validity_mask_BS,
+            source_nonpadding_mask_BS=source_nonpadding_mask_BS,
             source_attention_mask_BSS=source_attention_mask_BSS,
         )
         generated_token_id_BT = torch.full(
@@ -730,7 +731,7 @@ class UniversalTransformer(nn.Module):
             decoder_state_BTD, _ = self.decode(
                 generated_token_id_BT,
                 encoder_state_BSD,
-                source_validity_mask_BS=source_validity_mask_BS,
+                source_nonpadding_mask_BS=source_nonpadding_mask_BS,
             )
             next_token_id_B = self.output_projection(decoder_state_BTD[:, -1]).argmax(
                 dim=-1
@@ -750,47 +751,47 @@ class UniversalTransformer(nn.Module):
         return generated_token_id_BT
 
     @staticmethod
-    def _token_mask(
+    def _nonpadding_mask(
         token_id_BL: Tensor,
-        validity_mask_BL: Tensor | None,
+        nonpadding_mask_BL: Tensor | None,
     ) -> Tensor:
         if token_id_BL.ndim != 2:
             raise ValueError("token IDs must have shape (batch, length)")
-        return UniversalTransformer._state_mask(
+        return UniversalTransformer._state_nonpadding_mask(
             token_id_BL.shape[0],
             token_id_BL.shape[1],
             token_id_BL.device,
-            validity_mask_BL,
+            nonpadding_mask_BL,
         )
 
     @staticmethod
-    def _state_mask(
+    def _state_nonpadding_mask(
         batch_size: int,
         length: int,
         device: torch.device,
-        validity_mask_BL: Tensor | None,
+        nonpadding_mask_BL: Tensor | None,
     ) -> Tensor:
-        if validity_mask_BL is None:
+        if nonpadding_mask_BL is None:
             return torch.ones((batch_size, length), device=device, dtype=torch.bool)
-        if validity_mask_BL.shape != (batch_size, length):
-            raise ValueError("validity masks must have shape (batch, length)")
-        return validity_mask_BL.to(device=device, dtype=torch.bool)
+        if nonpadding_mask_BL.shape != (batch_size, length):
+            raise ValueError("nonpadding masks must have shape (batch, length)")
+        return nonpadding_mask_BL.to(device=device, dtype=torch.bool)
 
     @staticmethod
     def _self_attention_mask(
-        token_validity_mask_BL: Tensor,
+        token_nonpadding_mask_BL: Tensor,
         *,
         causal: bool,
         supplied_mask_BLL: Tensor | None,
     ) -> Tensor:
-        length = token_validity_mask_BL.shape[1]
+        length = token_nonpadding_mask_BL.shape[1]
         attention_mask_BLL = (
-            token_validity_mask_BL[:, :, None] & token_validity_mask_BL[:, None, :]
+            token_nonpadding_mask_BL[:, :, None] & token_nonpadding_mask_BL[:, None, :]
         )
         if causal:
             causal_mask_LL = torch.ones(
                 (length, length),
-                device=token_validity_mask_BL.device,
+                device=token_nonpadding_mask_BL.device,
                 dtype=torch.bool,
             ).tril()
             attention_mask_BLL = attention_mask_BLL & causal_mask_LL[None, :, :]
