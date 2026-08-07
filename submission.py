@@ -18,6 +18,7 @@ Tensor shape suffixes use the following dimension key:
 - C: generic convolution input channels
 - O: generic convolution output channels
 - R: number of sinusoidal frequencies (D / 2)
+- N: valid target-token count after evaluator flattening
 
 Suffix letters appear in physical axis order. Scalar tensors and heterogeneous
 tensor containers do not carry a shape suffix.
@@ -29,6 +30,13 @@ import math
 
 import torch
 import torch.nn.functional as F
+from benchmark import (
+    ModelSpec,
+    OptimizerBundle,
+    OptimizerSpec,
+    Submission,
+    assert_model_state,
+)
 from torch import Tensor, nn
 
 
@@ -41,6 +49,7 @@ class UniversalTransformerConfig:
         target_vocab_size: int,
         act_max_steps: int,
         *,
+        max_seq_len: int | None = None,
         hidden_size: int = 512,
         filter_size: int = 2048,
         num_heads: int = 8,
@@ -92,6 +101,8 @@ class UniversalTransformerConfig:
 
         self.source_vocab_size = source_vocab_size
         self.target_vocab_size = target_vocab_size
+        self.vocab_size = target_vocab_size
+        self.max_seq_len = max_seq_len
         self.act_max_steps = act_max_steps
         self.hidden_size = hidden_size
         self.filter_size = filter_size
@@ -683,15 +694,23 @@ class UniversalTransformer(nn.Module):
     def forward(
         self,
         source_token_id_BS: Tensor,
-        decoder_input_token_id_BT: Tensor,
+        decoder_input_token_id_BT: Tensor | None = None,
         *,
+        attention_mask: Tensor | None = None,
         source_nonpadding_mask_BS: Tensor | None = None,
         decoder_nonpadding_mask_BT: Tensor | None = None,
         source_attention_mask_BSS: Tensor | None = None,
         decoder_attention_mask_BTT: Tensor | None = None,
         cross_attention_mask_BTS: Tensor | None = None,
     ) -> tuple[Tensor, dict[str, object]]:
-        """Return target logits for already-right-shifted decoder inputs."""
+        """Return target logits for explicit or benchmark-compatible decoder inputs."""
+        if decoder_input_token_id_BT is None:
+            decoder_input_token_id_BT = source_token_id_BS
+            if attention_mask is not None:
+                if attention_mask.ndim != 2:
+                    raise ValueError("attention_mask must have shape (batch, length)")
+                source_nonpadding_mask_BS = attention_mask
+                decoder_nonpadding_mask_BT = attention_mask
         encoder_state_BSD, encoder_statistics = self.encode(
             source_token_id_BS,
             source_nonpadding_mask_BS=source_nonpadding_mask_BS,
@@ -853,3 +872,50 @@ class UniversalTransformer(nn.Module):
             device=base_mask_BLM.device,
             dtype=torch.bool,
         )
+
+
+def build_model(spec: ModelSpec) -> UniversalTransformer:
+    config = UniversalTransformerConfig(
+        source_vocab_size=spec.vocab_size,
+        target_vocab_size=spec.vocab_size,
+        act_max_steps=12,
+        max_seq_len=spec.max_seq_len,
+        hidden_size=128,
+        filter_size=512,
+        num_heads=4,
+    )
+    model = UniversalTransformer(config)
+    assert_model_state(model, spec)
+    return model
+
+
+def build_optimizer(
+    model: nn.Module,
+    spec: OptimizerSpec,
+) -> OptimizerBundle:
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=1e-3,
+        betas=(0.9, 0.98),
+        eps=1e-9,
+        capturable=spec.device_type == "cuda",
+    )
+    return OptimizerBundle(optimizer)
+
+
+def training_loss(
+    logits_NV: Tensor,
+    labels_N: Tensor,
+    auxiliary: dict[str, object],
+) -> Tensor:
+    act_loss = auxiliary["act_loss"]
+    if not isinstance(act_loss, Tensor):
+        raise TypeError("auxiliary['act_loss'] must be a tensor")
+    return F.cross_entropy(logits_NV, labels_N) + act_loss
+
+
+SUBMISSION = Submission(
+    build_model=build_model,
+    build_optimizer=build_optimizer,
+    training_loss=training_loss,
+)
