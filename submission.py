@@ -372,11 +372,12 @@ class AdaptiveRecurrentStack(nn.Module):
         nonpadding_mask_BL: Tensor,
         *block_argument_tensors: Tensor,
     ) -> tuple[Tensor, dict[str, Tensor]]:
-        """Encode source tokens into contextual representations.
+        """Refine token representations by recurrently applying a tied block with per-token adaptive halting..
 
-        IN: state, non-padding mask and *
-        self-attention mask for encoder
-        self-attention mask, encoder state, and cross-attention mask for decoder
+        IN: state,
+            non-padding mask and *,
+            self-attention mask for encoder
+            self-attention mask, encoder state, and cross-attention mask for decoder
 
         OUT: contextual source states [B, S, D] and ACT statistics.
         """
@@ -498,8 +499,9 @@ class UniversalTransformerEncoder(nn.Module):
     ) -> tuple[Tensor, dict[str, Tensor]]:
         """Encode source tokens into contextual representations.
 
-        IN: source token IDs [B, S], non-padding mask [B, S], and
-        self-attention mask [B, S, S].
+        IN: source token IDs [B, S],
+            non-padding mask [B, S],
+            self-attention mask [B, S, S].
 
         OUT: contextual source states [B, S, D] and ACT statistics.
         """
