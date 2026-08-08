@@ -23,6 +23,31 @@ benchmark
 ask
 * model | optimizer | learning rate scheduler | loss function
 
+```text
+_train()
+  model.train()
+  loop:
+    optimizer.zero_grad()
+    logits, auxiliary = model(input_ids, attention_mask)
+    valid_logits, valid_labels = align_and_filter(logits, labels, target_positions)
+    loss = submission.training_loss(valid_logits, valid_labels, auxiliary)
+    loss.backward()
+    clip_gradients()
+    optimizer.step()
+    scheduler.step()  # if supplied
+
+_evaluate()
+  model.eval()
+  with no_grad():
+    for batch:
+      logits, _ = model(input_ids, attention_mask)
+      valid_logits, valid_labels = align_and_filter(logits, labels, target_positions)
+      loss = cross_entropy(valid_logits, valid_labels)  # evaluator-owned
+      accumulate loss weighted by number of valid tokens
+      accumulate exact whole-answer accuracy
+  average_loss = weighted_loss_sum / valid_token_count
+```
+
 ## Scope
 
 The motivating limitation is not that every Transformer has exactly 100 layers, but that its serial computational depth is fixed at training time and is usually only tens to low hundreds of layers.
