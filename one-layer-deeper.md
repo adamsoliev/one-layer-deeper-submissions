@@ -23,6 +23,7 @@ benchmark
 ask
 * model | optimizer | learning rate scheduler | loss function
 
+high-level evaluator flow
 ```text
 _train()
   model.train()
