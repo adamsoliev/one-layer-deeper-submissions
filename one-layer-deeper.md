@@ -49,7 +49,7 @@ _evaluate()
   average_loss = weighted_loss_sum / valid_token_count
 ```
 
-separate_input_output dataset organization
+dataset organization
 
 A `separate_input_output` record stores the prompt and answer as genuinely separate token lists.
 `input_ids` contains only the problem description—conceptually `[N, digits(N), X, digits(x), T, digits(T)]`—while `labels` contains only the decimal tokens of the answer.
