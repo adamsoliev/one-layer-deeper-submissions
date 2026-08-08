@@ -1,6 +1,6 @@
 # [One Layer Deeper](https://blog.tilderesearch.com/blog/one-layer-deeper)
 
-how to think longer vs transformer/CoT
+how to think more effectively and more efficiently vs transformer/CoT
 * looped layers
     * universal transformers/adaptive computation time
     * deep equilibrium models
@@ -72,18 +72,6 @@ The model must return `(logits_BLV, auxiliary)`, where the first two dimensions 
 The evaluator then gathers `answer_logits_BTV = logits_BLV[batch_indices, target_positions_BT]` from the tail of each example's output sequence—its final `t_i` non-padding positions—constructs `valid_mask_BT = labels_BT != -100`, and compares only valid gathered logits with valid labels.
 In the default and legacy custom-loss path, these are flattened to `logits_NV` and `labels_N`, where `N` is the total number of valid target tokens in the batch; the structured `token_training_loss` path instead receives the padded `BTV` and `BT` tensors and mask.
 In short, the external shape contract is `input BL -> model output BLV -> evaluator gather BTV <-> target BT`.
-
-## Scope
-
-The motivating limitation is not that every Transformer has exactly 100 layers, but that its serial computational depth is fixed at training time and is usually only tens to low hundreds of layers.
-
-This makes a standard forward pass highly parallel, but it also makes computations whose required number of sequential steps grows with the input difficult to represent or extrapolate.
-
-Chain-of-thought partly escapes the fixed-depth limit by putting intermediate state into the token stream, so every generated reasoning token supplies another full model evaluation.
-
-The escape hatch is expensive because conventional decoding is autoregressive: a model cannot compute token \(t+1\) until token \(t\) exists.
-
-The literature below distinguishes three different goals that are often conflated: adding serial depth inside the model, generating several output tokens in parallel, and merely reducing the cost of each still-sequential autoregressive step.
 
 ## PhD theses
 
