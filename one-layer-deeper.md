@@ -67,12 +67,11 @@ The requested result is `5^(2^2) mod 323 = 302`, so the separate target has symb
 
 model input, output, and target shapes
 
-The evaluator calls the model with `input_ids_BL` and `attention_mask_BL`; it does not give the model `labels_BT`, `target_positions_BT`, or the answer length.
+The evaluator calls the model with `input_ids_BL` and `attention_mask_BL`. 
 The model must return `(logits_BLV, auxiliary)`, where the first two dimensions exactly match the padded input shape and `V` equals `model.config.vocab_size`.
-It therefore emits a vocabulary distribution at every prompt position.
 The evaluator then gathers `answer_logits_BTV = logits_BLV[batch_indices, target_positions_BT]`, constructs `valid_mask_BT = labels_BT != -100`, and compares only valid gathered logits with valid labels.
 In the default and legacy custom-loss path, these are flattened to `logits_NV` and `labels_N`, where `N` is the total number of valid target tokens in the batch; the structured `token_training_loss` path instead receives the padded `BTV` and `BT` tensors and mask.
-In short, the external shape contract is `input BL -> model output BLV -> evaluator gather BTV <-> target BT`; the model never directly produces a variable answer-length tensor.
+In short, the external shape contract is `input BL -> model output BLV -> evaluator gather BTV <-> target BT`.
 
 ## Scope
 
