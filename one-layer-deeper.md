@@ -60,6 +60,11 @@ Here `B` is batch size, `L` is the maximum prompt length in that batch, and `T` 
 The collator also constructs `target_positions_BT`; for each example its valid entries are `[l_i - t_i, ..., l_i - 1]`, while padded entries are `-1`.
 Thus the answer is aligned against the final `t_i` output positions of that example's unpadded prompt, even though those input positions still contain prompt tokens rather than answer placeholders.
 
+The vocabulary contains 17 tokens: `[PAD] = 0`, `[BOS] = 1`, `[N] = 2`, `[X] = 3`, `[T] = 4`, `[ANS] = 5`, `[EOS] = 6`, and decimal digit `d` maps to token ID `7 + d`.
+For example, the E1 prompt `(N=323, x=5, T=2)` has symbols `[N] [3] [2] [3] [X] [5] [T] [2]` and `input_ids = [2, 10, 9, 10, 3, 12, 4, 9]`.
+Reading from each field marker until the next marker reconstructs the decimal values: token IDs `[10, 9, 10]` map to digits `[3, 2, 3]`, token ID `[12]` maps to digit `[5]`, and token ID `[9]` maps to digit `[2]`.
+The requested result is `5^(2^2) mod 323 = 302`, so the separate target has symbols `[3] [0] [2]` and `labels = [10, 7, 9]`.
+
 model input, output, and target shapes
 
 The evaluator calls the model with `input_ids_BL` and `attention_mask_BL`; it does not give the model `labels_BT`, `target_positions_BT`, or the answer length.
