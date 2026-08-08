@@ -73,6 +73,23 @@ The evaluator then gathers `answer_logits_BTV = logits_BLV[batch_indices, target
 In the default and legacy custom-loss path, these are flattened to `logits_NV` and `labels_N`, where `N` is the total number of valid target tokens in the batch; the structured `token_training_loss` path instead receives the padded `BTV` and `BT` tensors and mask.
 In short, the external shape contract is `input BL -> model output BLV -> evaluator gather BTV <-> target BT`.
 
+training/evaluation setup
+
+The evaluator gives each tier a fixed training wall-clock allowance: Easy gets 60 seconds, Medium gets 600 seconds, and Hard gets 3,600 seconds.
+Submission import, model and optimizer construction, and compilation consume that allowance; whatever remains is available to the training loop.
+The public Easy and Medium manifests use one seed and permit up to 1,000,000 optimizer steps, so the time deadline normally binds first.
+A submission may specify a smaller `max_steps`, in which case training stops at `min(submission.max_steps, evaluator.max_steps)` even if time remains.
+Consequently, the actual update count is architecture-dependent: a small model with cheap recurrence completes more forward, backward, and update cycles, whereas a wide model, larger batch, or many recurrent steps consumes more time per update and completes fewer.
+The dataloader cycles when exhausted, so steps are not limited to one pass through the training set.
+More computation inside each step may make each gradient more useful, but it reduces the number of parameter updates and examples processed before the deadline.
+
+Evaluation receives a separate allowance equal to half the training allowance: 30 seconds for Easy, 300 seconds for Medium, and 1,800 seconds for Hard.
+It performs no optimizer steps and has no participant-controlled evaluation-step limit; it must run the trained model once over every batch of every required scoring and depth-profile split within the shared evaluation deadline.
+The number of evaluation forwards therefore equals the number of dataset batches and depends on `eval_batch_size`, while Hard's exact dataset size and batch count remain private.
+Failure to finish is a timeout rather than a partial score.
+This matters for schedulers because the evaluator advances the scheduler once per completed optimizer step, not according to elapsed time: a 100-step warmup could consume nearly the entire Easy run for a slow recurrent model but only a small fraction for a fast model, and a fixed cosine horizon may never be reached or may decay too early.
+A step-based schedule is predictable only when the submission either imposes a realistic `max_steps` or accurately estimates the architecture's H100 steps per tier.
+
 ## PhD theses
 
 These entries require the dissertation as a whole, or at least a substantial chapter, to address fixed-depth Transformer computation, recurrent or adaptive-depth alternatives, or the latency imposed by serial autoregressive decoding.
