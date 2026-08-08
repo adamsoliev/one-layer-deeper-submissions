@@ -49,6 +49,26 @@ _evaluate()
   average_loss = weighted_loss_sum / valid_token_count
 ```
 
+separate_input_output dataset organization
+
+A `separate_input_output` record stores the prompt and answer as genuinely separate token lists.
+`input_ids` contains only the problem description—conceptually `[N, digits(N), X, digits(x), T, digits(T)]`—while `labels` contains only the decimal tokens of the answer.
+It does not append the answer, `BOS`, `ANS`, or `EOS` tokens to the prompt.
+During collation, prompts are right-padded to the longest prompt in the batch, giving `input_ids_BL`, and answers are independently right-padded to the longest answer, giving `labels_BT`.
+Here `B` is batch size, `L` is the maximum prompt length in that batch, and `T` is the maximum answer length; each example has actual lengths `l_i <= L` and `t_i <= T`, with `t_i <= l_i`.
+`attention_mask_BL` is true for real prompt tokens and false for padding, while answer padding uses label `-100`.
+The collator also constructs `target_positions_BT`; for each example its valid entries are `[l_i - t_i, ..., l_i - 1]`, while padded entries are `-1`.
+Thus the answer is aligned against the final `t_i` output positions of that example's unpadded prompt, even though those input positions still contain prompt tokens rather than answer placeholders.
+
+model input, output, and target shapes
+
+The evaluator calls the model with `input_ids_BL` and `attention_mask_BL`; it does not give the model `labels_BT`, `target_positions_BT`, or the answer length.
+The model must return `(logits_BLV, auxiliary)`, where the first two dimensions exactly match the padded input shape and `V` equals `model.config.vocab_size`.
+It therefore emits a vocabulary distribution at every prompt position.
+The evaluator then gathers `answer_logits_BTV = logits_BLV[batch_indices, target_positions_BT]`, constructs `valid_mask_BT = labels_BT != -100`, and compares only valid gathered logits with valid labels.
+In the default and legacy custom-loss path, these are flattened to `logits_NV` and `labels_N`, where `N` is the total number of valid target tokens in the batch; the structured `token_training_loss` path instead receives the padded `BTV` and `BT` tensors and mask.
+In short, the external shape contract is `input BL -> model output BLV -> evaluator gather BTV <-> target BT`; the model never directly produces a variable answer-length tensor.
+
 ## Scope
 
 The motivating limitation is not that every Transformer has exactly 100 layers, but that its serial computational depth is fixed at training time and is usually only tens to low hundreds of layers.
