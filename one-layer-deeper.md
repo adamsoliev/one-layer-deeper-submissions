@@ -69,7 +69,7 @@ model input, output, and target shapes
 
 The evaluator calls the model with `input_ids_BL` and `attention_mask_BL`. 
 The model must return `(logits_BLV, auxiliary)`, where the first two dimensions exactly match the padded input shape and `V` equals `model.config.vocab_size`.
-The evaluator then gathers `answer_logits_BTV = logits_BLV[batch_indices, target_positions_BT]`, constructs `valid_mask_BT = labels_BT != -100`, and compares only valid gathered logits with valid labels.
+The evaluator then gathers `answer_logits_BTV = logits_BLV[batch_indices, target_positions_BT]` from the tail of each example's output sequence—its final `t_i` non-padding positions—constructs `valid_mask_BT = labels_BT != -100`, and compares only valid gathered logits with valid labels.
 In the default and legacy custom-loss path, these are flattened to `logits_NV` and `labels_N`, where `N` is the total number of valid target tokens in the batch; the structured `token_training_loss` path instead receives the padded `BTV` and `BT` tensors and mask.
 In short, the external shape contract is `input BL -> model output BLV -> evaluator gather BTV <-> target BT`.
 
